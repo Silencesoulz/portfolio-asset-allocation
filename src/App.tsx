@@ -17,8 +17,8 @@ import {
   Eye,
   EyeOff,
   FilePenLine,
+  HeartPulse,
   Landmark,
-  ListChecks,
   Menu,
   MoreHorizontal,
   Pencil,
@@ -40,6 +40,7 @@ import {
 type Page = 'networth' | 'overview' | 'allocation' | 'holdings' | 'plan'
 type AssetClass = 'US equity' | 'International equity' | 'Fixed income' | 'Cash' | 'Real assets'
 type NetWorthCategory = 'Cash' | 'Stocks / funds' | 'Bonds / deposits' | 'Property' | 'Vehicle' | 'Other asset' | 'Mortgage' | 'Loan' | 'Credit card' | 'Other liability'
+type CurrencyCode = 'THB' | 'USD' | 'AUD'
 
 type Holding = {
   id: string
@@ -61,7 +62,7 @@ type NetWorthItem = {
 }
 
 type AppSettings = {
-  currency: string
+  currency: CurrencyCode
   monthlyEssentials: number
   emergencyTargetMonths: number
   savingsRate: number
@@ -132,25 +133,43 @@ const NET_WORTH_META: Record<NetWorthCategory | 'Investment portfolio', { color:
 const ASSET_CATEGORIES: NetWorthCategory[] = ['Cash', 'Stocks / funds', 'Bonds / deposits', 'Property', 'Vehicle', 'Other asset']
 const LIABILITY_CATEGORIES: NetWorthCategory[] = ['Mortgage', 'Loan', 'Credit card', 'Other liability']
 
-const NAV_ITEMS: Array<{ id: Page; label: string; icon: LucideIcon }> = [
-  { id: 'networth', label: 'Net worth', icon: Scale },
-  { id: 'allocation', label: 'Asset plan', icon: PieChartIcon },
-  { id: 'plan', label: 'Money plan', icon: ListChecks },
+const NAV_ITEMS: Array<{ id: Page; label: string; shortLabel: string; icon: LucideIcon; tone: 'gold' | 'mint' | 'coral' }> = [
+  { id: 'networth', label: 'Net Worth', shortLabel: 'Net Worth', icon: WalletCards, tone: 'gold' },
+  { id: 'allocation', label: 'Investment Plan', shortLabel: 'Invest', icon: TrendingUp, tone: 'mint' },
+  { id: 'plan', label: 'Financial Health', shortLabel: 'Health', icon: HeartPulse, tone: 'coral' },
 ]
 
 const CURRENCIES = [
-  { code: 'USD', label: 'US dollar' },
   { code: 'THB', label: 'Thai baht' },
+  { code: 'USD', label: 'US dollar' },
   { code: 'AUD', label: 'Australian dollar' },
 ] as const
 
 const STORAGE_KEY = 'steady-portfolio-v1'
+const EXCHANGE_RATE_CACHE_KEY = 'steady-exchange-rates-v1'
+const BASE_CURRENCY: CurrencyCode = 'THB'
+
+type ExchangeRateSnapshot = {
+  rates: Partial<Record<CurrencyCode, number>>
+  date: string | null
+  fetchedAt: number | null
+}
+
+function loadCachedExchangeRates(): ExchangeRateSnapshot {
+  try {
+    const cached = JSON.parse(window.localStorage.getItem(EXCHANGE_RATE_CACHE_KEY) ?? '') as ExchangeRateSnapshot
+    if (!cached.rates || typeof cached.rates.USD !== 'number' || typeof cached.rates.AUD !== 'number') throw new Error('Invalid rate cache')
+    return { ...cached, rates: { ...cached.rates, THB: 1 } }
+  } catch {
+    return { rates: { THB: 1 }, date: null, fetchedAt: null }
+  }
+}
 
 function makeInitialData(): AppData {
   const reviewed = new Date()
   reviewed.setDate(reviewed.getDate() - 60)
   return {
-    dataVersion: 2,
+    dataVersion: 3,
     holdings: [],
     netWorthItems: [
       { id: 'sample-cash', name: 'Cash and savings', category: 'Cash', value: 32000, note: 'Bank accounts', isSample: true },
@@ -167,7 +186,7 @@ function makeInitialData(): AppData {
       'Real assets': 5,
     },
     settings: {
-      currency: 'USD',
+      currency: BASE_CURRENCY,
       monthlyEssentials: 4200,
       emergencyTargetMonths: 6,
       savingsRate: 18,
@@ -207,12 +226,17 @@ function loadData(): AppData {
       parsed.holdings = []
       parsed.dataVersion = 2
     }
+    if (parsed.dataVersion < 3) {
+      // All balances use THB as their permanent base from version 3 onward.
+      parsed.settings.currency = BASE_CURRENCY
+      parsed.dataVersion = 3
+    }
     parsed.settings.cashReturnRate ??= 2
     parsed.settings.incomeReturnRate ??= 4
     parsed.settings.growthReturnRate ??= 7
     parsed.settings.lastNetWorthUpdated ??= parsed.settings.lastReviewed ?? new Date().toISOString()
     if (!CURRENCIES.some((currency) => currency.code === parsed.settings.currency)) {
-      parsed.settings.currency = 'USD'
+      parsed.settings.currency = BASE_CURRENCY
     }
     if (parsed.isSample && parsed.holdings.length > 0 && parsed.holdings.every((holding) => holding.isSample === undefined)) {
       parsed.holdings = parsed.holdings.map((holding) => ({ ...holding, isSample: true }))
@@ -257,6 +281,8 @@ function normalizeRateText(value: string) {
 
 function App() {
   const [data, setData] = useState<AppData>(loadData)
+  const [exchangeRates, setExchangeRates] = useState<ExchangeRateSnapshot>(loadCachedExchangeRates)
+  const [exchangeRateStatus, setExchangeRateStatus] = useState<'loading' | 'live' | 'cached' | 'error'>('loading')
   const [page, setPage] = useState<Page>('networth')
   const [amountsVisible, setAmountsVisible] = useState(true)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
@@ -269,6 +295,43 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
   }, [data])
+
+  useEffect(() => {
+    let active = true
+    let hasUsableRates = Boolean(loadCachedExchangeRates().rates.USD && loadCachedExchangeRates().rates.AUD)
+
+    const refreshExchangeRates = async () => {
+      setExchangeRateStatus((current) => current === 'live' ? 'live' : 'loading')
+      try {
+        const response = await fetch('https://api.frankfurter.dev/v2/rates?base=THB&quotes=USD,AUD')
+        if (!response.ok) throw new Error(`Exchange-rate request failed: ${response.status}`)
+        const payload = await response.json() as Array<{ date: string; base: string; quote: string; rate: number }>
+        const usd = payload.find((item) => item.base === BASE_CURRENCY && item.quote === 'USD')
+        const aud = payload.find((item) => item.base === BASE_CURRENCY && item.quote === 'AUD')
+        if (!usd || !aud || !Number.isFinite(usd.rate) || !Number.isFinite(aud.rate)) throw new Error('Exchange-rate response was incomplete')
+        const snapshot: ExchangeRateSnapshot = {
+          rates: { THB: 1, USD: usd.rate, AUD: aud.rate },
+          date: usd.date,
+          fetchedAt: Date.now(),
+        }
+        if (!active) return
+        hasUsableRates = true
+        setExchangeRates(snapshot)
+        setExchangeRateStatus('live')
+        window.localStorage.setItem(EXCHANGE_RATE_CACHE_KEY, JSON.stringify(snapshot))
+      } catch {
+        if (!active) return
+        setExchangeRateStatus(hasUsableRates ? 'cached' : 'error')
+      }
+    }
+
+    void refreshExchangeRates()
+    const refreshTimer = window.setInterval(refreshExchangeRates, 60 * 60 * 1000)
+    return () => {
+      active = false
+      window.clearInterval(refreshTimer)
+    }
+  }, [])
 
   useEffect(() => {
     if (!toast) return
@@ -307,13 +370,22 @@ function App() {
 
   const formatMoney = (value: number, compact = false) => {
     if (!amountsVisible) return '••••••'
+    const rate = exchangeRates.rates[data.settings.currency]
+    if (rate === undefined) return 'Rate unavailable'
     return new Intl.NumberFormat(currencyLocale(data.settings.currency), {
       style: 'currency',
       currency: data.settings.currency,
       maximumFractionDigits: compact ? 1 : 0,
       notation: compact ? 'compact' : 'standard',
-    }).format(value)
+    }).format(value * rate)
   }
+
+  const selectedExchangeRate = exchangeRates.rates[data.settings.currency]
+  const exchangeRateTitle = data.settings.currency === BASE_CURRENCY
+    ? 'THB is the base currency used for all saved values'
+    : selectedExchangeRate
+      ? `1 THB = ${selectedExchangeRate.toFixed(5)} ${data.settings.currency}${exchangeRates.date ? ` · Reference rate ${exchangeRates.date}` : ''}`
+      : `Latest ${data.settings.currency} rate is unavailable`
 
   const reminders: Reminder[] = (() => {
     const items: Reminder[] = []
@@ -324,7 +396,7 @@ function App() {
     const creditCardDebt = data.netWorthItems.filter((item) => item.category === 'Credit card').reduce((sum, item) => sum + item.value, 0)
 
     if (data.settings.hasHighInterestDebt || creditCardDebt > 0) {
-      items.push({ id: 'high-interest-debt', title: 'Review costly debt', message: creditCardDebt > 0 ? `${formatMoney(creditCardDebt)} in credit-card balances is recorded.` : 'You reported high-interest debt in your money plan.', page: 'plan', action: 'Review debt plan', tone: 'coral' })
+      items.push({ id: 'high-interest-debt', title: 'Review costly debt', message: creditCardDebt > 0 ? `${formatMoney(creditCardDebt)} in credit-card balances is recorded.` : 'You reported high-interest debt in Financial Health.', page: 'plan', action: 'Open Financial Health', tone: 'coral' })
     }
     if (reserveTarget > 0 && netWorthTotals.cash < reserveTarget) {
       items.push({ id: 'emergency-fund', title: 'Emergency reserve gap', message: `${formatMoney(reserveTarget - netWorthTotals.cash)} remains to reach your ${data.settings.emergencyTargetMonths}-month target.`, page: 'plan', action: 'Review reserve', tone: 'sand' })
@@ -333,7 +405,7 @@ function App() {
       items.push({ id: 'monthly-update', title: 'Monthly net-worth update', message: `Your balances were last confirmed ${daysSinceNetWorthUpdate} days ago.`, page: 'networth', action: 'Review balances', tone: 'green', canComplete: true })
     }
     if (daysSinceAssetReview >= 90) {
-      items.push({ id: 'asset-review', title: 'Asset plan review due', message: `Your asset organization was last reviewed ${daysSinceAssetReview} days ago.`, page: 'allocation', action: 'Open asset plan', tone: 'blue', canComplete: true })
+      items.push({ id: 'asset-review', title: 'Investment plan review due', message: `Your asset organization was last reviewed ${daysSinceAssetReview} days ago.`, page: 'allocation', action: 'Open investment plan', tone: 'blue', canComplete: true })
     }
     if (data.netWorthItems.some((item) => item.isSample)) {
       items.push({ id: 'sample-data', title: 'Replace sample totals', message: 'Example assets and liabilities are still included in your net worth.', page: 'networth', action: 'Review examples', tone: 'sand' })
@@ -408,7 +480,7 @@ function App() {
   const completeReminder = (reminder: Reminder) => {
     if (reminder.id === 'monthly-update') updateSettings('lastNetWorthUpdated', new Date().toISOString())
     if (reminder.id === 'asset-review') updateSettings('lastReviewed', new Date().toISOString())
-    setToast(reminder.id === 'monthly-update' ? 'Balances marked as reviewed' : 'Asset plan marked as reviewed')
+    setToast(reminder.id === 'monthly-update' ? 'Balances marked as reviewed' : 'Investment plan marked as reviewed')
   }
 
   const renderPage = () => {
@@ -443,7 +515,7 @@ function App() {
             formatMoney={formatMoney}
             onAdd={() => setEditingHolding(null)}
             onEdit={setEditingHolding}
-            currency={data.settings.currency}
+            currency={BASE_CURRENCY}
           />
         )
       case 'plan':
@@ -490,8 +562,8 @@ function App() {
                 key={item.id}
                 onClick={() => navigate(item.id)}
               >
-                <Icon size={18} />
-                <span>{item.label}</span>
+                <span className={cx('nav-icon', `nav-icon--${item.tone}`)}><Icon size={17} strokeWidth={2.2} /></span>
+                <span className="nav-label">{item.label}</span>
                 {page === item.id && <span className="nav-dot" />}
               </button>
             )
@@ -522,11 +594,13 @@ function App() {
             <span>My portfolio</span><ChevronRight size={14} /><strong>{NAV_ITEMS.find((item) => item.id === page)?.label}</strong>
           </div>
           <div className="topbar__actions">
-            <label className="currency-control" title="Changes currency labels only; values are not converted">
+            <label className="currency-control" title={exchangeRateTitle}>
               <span className="sr-only">Display currency</span>
-              <select value={data.settings.currency} onChange={(event) => updateSettings('currency', event.target.value)} aria-label="Display currency">
+              <select value={data.settings.currency} onChange={(event) => updateSettings('currency', event.target.value as CurrencyCode)} aria-label="Display currency">
                 {CURRENCIES.map((currency) => <option value={currency.code} key={currency.code}>{currency.code}</option>)}
               </select>
+              <span className={cx('exchange-status-dot', `exchange-status-dot--${exchangeRateStatus}`)} aria-hidden="true" />
+              <span className="sr-only" aria-live="polite">{exchangeRateStatus === 'live' ? `Latest exchange rates loaded for ${exchangeRates.date}` : exchangeRateStatus === 'cached' ? 'Using the most recently saved exchange rates' : exchangeRateStatus === 'error' ? 'Exchange rates are currently unavailable' : 'Loading latest exchange rates'}</span>
             </label>
             <button
               className="icon-button"
@@ -582,14 +656,14 @@ function App() {
       <nav className="mobile-tabs" aria-label="Mobile navigation">
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon
-          return <button key={item.id} className={cx(page === item.id && 'active')} onClick={() => navigate(item.id)}><Icon size={19} /><span>{item.label.split(' ')[0]}</span></button>
+          return <button key={item.id} className={cx(page === item.id && 'active')} onClick={() => navigate(item.id)}><span className={cx('mobile-tab-icon', `mobile-tab-icon--${item.tone}`)}><Icon size={17} strokeWidth={2.2} /></span><span>{item.shortLabel}</span></button>
         })}
       </nav>
 
       {editingHolding !== undefined && (
         <HoldingModal
           holding={editingHolding}
-          currency={data.settings.currency}
+          currency={BASE_CURRENCY}
           onClose={() => setEditingHolding(undefined)}
           onSave={saveHolding}
           onDelete={deleteHolding}
@@ -599,7 +673,7 @@ function App() {
       {editingNetWorthItem !== undefined && (
         <NetWorthItemModal
           item={editingNetWorthItem}
-          currency={data.settings.currency}
+          currency={BASE_CURRENCY}
           onClose={() => setEditingNetWorthItem(undefined)}
           onSave={saveNetWorthItem}
           onDelete={deleteNetWorthItem}
@@ -662,12 +736,16 @@ function NetWorthPage({ items, portfolioTotal, formatMoney, onAdd, onEdit, onCle
       color: NET_WORTH_META[category].color,
     })),
   ].filter((item) => item.value > 0)
+  const groupedItems = [...ASSET_CATEGORIES, ...LIABILITY_CATEGORIES].map((category) => ({
+    category,
+    items: items.filter((item) => item.category === category),
+  })).filter((group) => group.items.length > 0)
 
   return (
     <>
       <PageHeading
         eyebrow="Your complete picture"
-        title="Net worth"
+        title="Net Worth"
         copy="See what you own, subtract what you owe, and follow the number that reflects your whole financial life."
         actions={<button className="button button--primary" onClick={onAdd}><Plus size={17} /> Add asset or debt</button>}
       />
@@ -680,7 +758,7 @@ function NetWorthPage({ items, portfolioTotal, formatMoney, onAdd, onEdit, onCle
         </div>
       )}
 
-      <section className="metric-grid net-worth-metrics" aria-label="Net worth summary">
+      <section className="metric-grid net-worth-metrics" aria-label="Net Worth summary">
         <MetricCard label="Total net worth" value={formatMoney(netWorth)} helper="Everything you own minus everything you owe" icon={Scale} tone="green" />
         <MetricCard label="Total assets" value={formatMoney(totalAssets)} helper={`${assets.length + (portfolioTotal > 0 ? 1 : 0)} asset group${assets.length + (portfolioTotal > 0 ? 1 : 0) === 1 ? '' : 's'} tracked`} icon={BadgeCheck} tone="sand" />
         <MetricCard label="Total liabilities" value={formatMoney(totalLiabilities)} helper={totalLiabilities > 0 ? `${debtRatio.toFixed(1)}% of total assets` : 'No liabilities recorded'} icon={CircleMinus} tone={totalLiabilities > 0 ? 'coral' : 'green'} />
@@ -714,7 +792,7 @@ function NetWorthPage({ items, portfolioTotal, formatMoney, onAdd, onEdit, onCle
           <div className="equation-list">
             <div><span className="equation-icon equation-icon--asset"><Plus size={17} /></span><div><span>Total assets</span><strong>{formatMoney(totalAssets)}</strong></div></div>
             <div><span className="equation-icon equation-icon--debt"><CircleMinus size={17} /></span><div><span>Total liabilities</span><strong>− {formatMoney(totalLiabilities)}</strong></div></div>
-            <div className="equation-result"><span>Net worth</span><strong className={cx(netWorth < 0 && 'negative')}>{formatMoney(netWorth)}</strong></div>
+            <div className="equation-result"><span>Net Worth</span><strong className={cx(netWorth < 0 && 'negative')}>{formatMoney(netWorth)}</strong></div>
           </div>
           <div className="net-worth-guidance">
             <Sprout size={18} />
@@ -726,18 +804,25 @@ function NetWorthPage({ items, portfolioTotal, formatMoney, onAdd, onEdit, onCle
       <section className="card balance-sheet-card">
         <CardHeader eyebrow="Accounts & property" title="Your balance sheet" />
         <div className="balance-sheet-list">
-          {portfolioTotal > 0 && (
-            <div className="balance-row balance-row--linked">
-              <div className="balance-icon" style={{ color: NET_WORTH_META['Investment portfolio'].color, background: NET_WORTH_META['Investment portfolio'].soft }}><TrendingUp size={18} /></div>
-              <div className="balance-name"><strong>Investment portfolio</strong><span>Stocks, bonds, portfolio cash, and real assets · linked</span></div>
-              <span className="balance-kind balance-kind--asset">Asset</span>
-              <strong className="balance-value">{formatMoney(portfolioTotal)}</strong>
-              <button className="icon-button icon-button--small" aria-label="View portfolio holdings" onClick={() => onNavigate('holdings')}><ArrowRight size={15} /></button>
-            </div>
-          )}
-          {assets.map((item) => <BalanceRow key={item.id} item={item} formatMoney={formatMoney} onEdit={onEdit} />)}
-          {liabilities.length > 0 && <div className="balance-divider"><span>Liabilities</span><i /></div>}
-          {liabilities.map((item) => <BalanceRow key={item.id} item={item} formatMoney={formatMoney} onEdit={onEdit} />)}
+          {groupedItems.map((group) => {
+            const liability = isLiabilityCategory(group.category)
+            const subtotal = group.items.reduce((sum, item) => sum + item.value, 0)
+            const meta = NET_WORTH_META[group.category]
+            return (
+              <div className="balance-group" key={group.category}>
+                <div className="balance-group__header">
+                  <div className="balance-group__identity">
+                    <span style={{ color: meta.color, background: meta.soft }}><CategoryIcon category={group.category} size={16} /></span>
+                    <div><strong>{group.category}</strong><small>{group.items.length} item{group.items.length === 1 ? '' : 's'} · {liability ? 'Liability' : 'Asset'}</small></div>
+                  </div>
+                  <strong className={cx(liability && 'negative')}>{liability ? '− ' : ''}{formatMoney(subtotal)}</strong>
+                </div>
+                <div className="balance-group__items">
+                  {group.items.map((item) => <BalanceRow grouped key={item.id} item={item} formatMoney={formatMoney} onEdit={onEdit} />)}
+                </div>
+              </div>
+            )
+          })}
           {portfolioTotal === 0 && items.length === 0 && <EmptyState icon={Scale} title="Nothing tracked yet" copy="Add your cash, property, vehicles, or debts to begin." action="Add asset or debt" onAction={onAdd} />}
         </div>
       </section>
@@ -747,14 +832,20 @@ function NetWorthPage({ items, portfolioTotal, formatMoney, onAdd, onEdit, onCle
   )
 }
 
-function BalanceRow({ item, formatMoney, onEdit }: { item: NetWorthItem; formatMoney: (value: number) => string; onEdit: (item: NetWorthItem) => void }) {
+function CategoryIcon({ category, size = 18 }: { category: NetWorthCategory; size?: number }) {
+  if (category === 'Cash') return <Banknote size={size} />
+  if (category === 'Stocks / funds') return <TrendingUp size={size} />
+  if (category === 'Bonds / deposits') return <Landmark size={size} />
+  if (category === 'Property') return <Building2 size={size} />
+  if (isLiabilityCategory(category)) return <CircleMinus size={size} />
+  return <CircleDollarSign size={size} />
+}
+
+function BalanceRow({ item, formatMoney, onEdit, grouped = false }: { item: NetWorthItem; formatMoney: (value: number) => string; onEdit: (item: NetWorthItem) => void; grouped?: boolean }) {
   const liability = isLiabilityCategory(item.category)
-  const meta = NET_WORTH_META[item.category]
-  const Icon = item.category === 'Cash' ? Banknote : item.category === 'Stocks / funds' ? TrendingUp : item.category === 'Bonds / deposits' ? Landmark : item.category === 'Property' ? Building2 : liability ? CircleMinus : CircleDollarSign
   return (
     <div className="balance-row">
-      <div className="balance-icon" style={{ color: meta.color, background: meta.soft }}><Icon size={18} /></div>
-      <div className="balance-name"><strong>{item.name}</strong><span>{item.category}{item.note ? ` · ${item.note}` : ''}</span></div>
+      <div className="balance-name"><strong>{item.name}</strong><span>{grouped ? (item.note || 'No note added') : `${item.category}${item.note ? ` · ${item.note}` : ''}`}</span></div>
       <span className={cx('balance-kind', liability ? 'balance-kind--debt' : 'balance-kind--asset')}>{liability ? 'Liability' : 'Asset'}</span>
       <strong className={cx('balance-value', liability && 'balance-value--debt')}>{liability ? '− ' : ''}{formatMoney(item.value)}</strong>
       <button className="icon-button icon-button--small" aria-label={`Edit ${item.name}`} onClick={() => onEdit(item)}><Pencil size={15} /></button>
@@ -1050,7 +1141,7 @@ function AssetPlanPage({ items, settings, formatMoney, updateSettings, onNavigat
     <>
       <PageHeading
         eyebrow="Illustrative organization"
-        title="Asset plan"
+        title="Investment Plan"
         copy="Use your asset totals to compare your current mix with a simple cash, income, and growth framework."
         actions={<span className="assumption-chip"><Sparkles size={14} /> Uses editable assumptions</span>}
       />
@@ -1059,7 +1150,7 @@ function AssetPlanPage({ items, settings, formatMoney, updateSettings, onNavigat
         <div className="priority-banner"><CircleMinus size={19} /><div><strong>High-interest debt comes first</strong><span>The assumed investment return may be lower and less certain than the cost of costly debt. Review your payoff plan before reallocating for growth.</span></div></div>
       )}
 
-      <section className="metric-grid" aria-label="Asset plan summary">
+      <section className="metric-grid" aria-label="Investment Plan summary">
         <MetricCard label="Investable assets" value={formatMoney(investable)} helper="Cash, deposits, bonds, stocks, and funds" icon={CircleDollarSign} tone="green" />
         <MetricCard label="Illustrative annual rate" value={`${targetRate.toFixed(1)}%`} helper="Weighted from your editable assumptions" icon={TrendingUp} tone="sand" />
         <MetricCard label="Estimated first-year growth" value={formatMoney(targetAnnualGrowth)} helper={`Current mix estimate: ${formatMoney(currentAnnualGrowth)}`} icon={BarChart3} tone="blue" />
@@ -1091,7 +1182,7 @@ function AssetPlanPage({ items, settings, formatMoney, updateSettings, onNavigat
                 )
               })}
             </div>
-          ) : <EmptyState icon={PieChartIcon} title="Add your asset totals first" copy="Enter cash, stocks or funds, and bonds or deposits on the Net worth page to generate a plan." action="Go to net worth" onAction={() => onNavigate('networth')} />}
+          ) : <EmptyState icon={PieChartIcon} title="Add your asset totals first" copy="Enter cash, stocks or funds, and bonds or deposits on the Net Worth page to generate a plan." action="Go to Net Worth" onAction={() => onNavigate('networth')} />}
         </section>
 
         <section className="card calculator-card">
@@ -1103,7 +1194,7 @@ function AssetPlanPage({ items, settings, formatMoney, updateSettings, onNavigat
             <RateInput label="Income rate" value={settings.incomeReturnRate} onChange={(value) => updateSettings('incomeReturnRate', value)} />
             <RateInput label="Growth return" value={settings.growthReturnRate} onChange={(value) => updateSettings('growthReturnRate', value)} />
           </div>
-          <label className="field"><span>Monthly contribution</span><div className="money-input"><span>{currencySymbol(settings.currency)}</span><input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={moneyInputValue(settings.monthlyContribution)} onChange={(event) => updateSettings('monthlyContribution', moneyNumberFromText(event.target.value))} /></div></label>
+          <label className="field"><span>Monthly contribution (THB)</span><div className="money-input"><span>{currencySymbol(BASE_CURRENCY)}</span><input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={moneyInputValue(settings.monthlyContribution)} onChange={(event) => updateSettings('monthlyContribution', moneyNumberFromText(event.target.value))} /></div></label>
           <div className="projection-box">
             <div><span>Today</span><strong>{formatMoney(investable)}</strong></div>
             <ArrowRight size={16} />
@@ -1328,7 +1419,7 @@ function PlanPage({ data, cash, total, formatMoney, updateSettings }: {
 
   return (
     <>
-      <PageHeading eyebrow="Before chasing returns" title="Money plan" copy="Connect your portfolio to the habits and safeguards that make long-term investing sustainable." />
+      <PageHeading eyebrow="Before chasing returns" title="Financial Health" copy="Connect your portfolio to the habits and safeguards that make long-term investing sustainable." />
 
       <section className="plan-hero">
         <div><span>Foundation score</span><strong>{readiness}<small>/100</small></strong><p>Based on the four planning inputs below—not market performance.</p></div>
@@ -1343,14 +1434,14 @@ function PlanPage({ data, cash, total, formatMoney, updateSettings }: {
             <div><strong>{cashMonths.toFixed(1)} months saved</strong><span>{formatMoney(cash)} of {formatMoney(reserveGoal)}</span></div>
             <div><span style={{ width: `${reserveProgress}%` }} /></div>
           </div>
-          <label className="field"><span>Essential spending per month</span><div className="money-input"><span>{currencySymbol(settings.currency)}</span><input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={moneyInputValue(settings.monthlyEssentials)} onChange={(event) => updateSettings('monthlyEssentials', moneyNumberFromText(event.target.value))} /></div></label>
+          <label className="field"><span>Essential spending per month (THB)</span><div className="money-input"><span>{currencySymbol(BASE_CURRENCY)}</span><input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={moneyInputValue(settings.monthlyEssentials)} onChange={(event) => updateSettings('monthlyEssentials', moneyNumberFromText(event.target.value))} /></div></label>
           <label className="field"><span>Reserve target</span><div className="range-value"><input type="range" min="1" max="12" value={settings.emergencyTargetMonths} onChange={(event) => updateSettings('emergencyTargetMonths', Number(event.target.value))} /><strong>{settings.emergencyTargetMonths} months</strong></div></label>
         </section>
 
         <section className="card plan-card">
           <div className="plan-card__top"><div className="plan-icon plan-icon--sand"><TrendingUp size={19} /></div><div><span>02 · Consistency</span><h2>Saving & investing</h2></div></div>
           <label className="field"><span>Savings rate</span><div className="range-value"><input type="range" min="0" max="80" value={settings.savingsRate} onChange={(event) => updateSettings('savingsRate', Number(event.target.value))} /><strong>{settings.savingsRate}%</strong></div></label>
-          <label className="field"><span>Monthly portfolio contribution</span><div className="money-input"><span>{currencySymbol(settings.currency)}</span><input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={moneyInputValue(settings.monthlyContribution)} onChange={(event) => updateSettings('monthlyContribution', moneyNumberFromText(event.target.value))} /></div></label>
+          <label className="field"><span>Monthly portfolio contribution (THB)</span><div className="money-input"><span>{currencySymbol(BASE_CURRENCY)}</span><input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={moneyInputValue(settings.monthlyContribution)} onChange={(event) => updateSettings('monthlyContribution', moneyNumberFromText(event.target.value))} /></div></label>
           <ToggleRow label="Automatic contributions" copy="Reduce the need for monthly willpower" checked={settings.autoContributions} onChange={(value) => updateSettings('autoContributions', value)} />
         </section>
 
@@ -1369,7 +1460,7 @@ function PlanPage({ data, cash, total, formatMoney, updateSettings }: {
           </div>
           <label className="field"><span>Goal name</span><input type="text" value={settings.goalName} onChange={(event) => updateSettings('goalName', event.target.value)} /></label>
           <div className="two-fields">
-            <label className="field"><span>Target amount</span><input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={moneyInputValue(settings.goalAmount)} onChange={(event) => updateSettings('goalAmount', moneyNumberFromText(event.target.value))} /></label>
+            <label className="field"><span>Target amount (THB)</span><input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={moneyInputValue(settings.goalAmount)} onChange={(event) => updateSettings('goalAmount', moneyNumberFromText(event.target.value))} /></label>
             <label className="field"><span>Target year</span><input type="number" min={new Date().getFullYear()} max="2200" value={settings.goalYear} onChange={(event) => updateSettings('goalYear', Number(event.target.value))} /></label>
           </div>
         </section>

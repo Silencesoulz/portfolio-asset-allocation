@@ -8,7 +8,7 @@ Steady is a private, browser-based net-worth and asset-allocation tracker for pe
 - One total per asset group instead of individual holding entry
 - A suggested cash, income, and growth mix based on risk posture and emergency-reserve needs
 - Editable return assumptions with first-year, five-year, and ten-year growth illustrations
-- A working reminder center for monthly balance updates, emergency-fund gaps, costly debt, sample cleanup, and periodic asset-plan reviews
+- A working reminder center for monthly balance updates, emergency-fund gaps, costly debt, sample cleanup, and periodic investment-plan reviews
 - Emergency reserve, savings rate, automatic contribution, debt, and long-term goal planning
 - Currency display including Thai baht (THB), privacy masking, responsive mobile navigation, and local browser persistence
 - Clearly separated sample data and educational disclaimers
