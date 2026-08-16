@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import type { User as SupabaseUser } from '@supabase/supabase-js'
 import {
   ArrowDownRight,
   ArrowRight,
@@ -13,13 +14,17 @@ import {
   ChevronRight,
   CircleDollarSign,
   CircleMinus,
+  Cloud,
+  CloudOff,
   Download,
   Eye,
   EyeOff,
   FilePenLine,
   HeartPulse,
   Landmark,
+  LogOut,
   Menu,
+  Mail,
   MoreHorizontal,
   Pencil,
   PieChart as PieChartIcon,
@@ -36,6 +41,7 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react'
+import { isSupabaseConfigured, supabase } from './lib/supabase'
 
 type Page = 'networth' | 'overview' | 'allocation' | 'holdings' | 'plan'
 type AssetClass = 'US equity' | 'International equity' | 'Fixed income' | 'Cash' | 'Real assets'
@@ -59,6 +65,14 @@ type NetWorthItem = {
   value: number
   note: string
   isSample?: boolean
+}
+
+type NetWorthSnapshot = {
+  month: string
+  assets: number
+  liabilities: number
+  netWorth: number
+  updatedAt: string
 }
 
 type AppSettings = {
@@ -97,8 +111,11 @@ type AppData = {
   netWorthItems: NetWorthItem[]
   targets: Record<AssetClass, number>
   settings: AppSettings
+  netWorthHistory: NetWorthSnapshot[]
   isSample: boolean
 }
+
+type SyncStatus = 'local' | 'loading' | 'saving' | 'synced' | 'error'
 
 const ASSET_CLASSES: AssetClass[] = [
   'US equity',
@@ -169,7 +186,7 @@ function makeInitialData(): AppData {
   const reviewed = new Date()
   reviewed.setDate(reviewed.getDate() - 60)
   return {
-    dataVersion: 3,
+    dataVersion: 4,
     holdings: [],
     netWorthItems: [
       { id: 'sample-cash', name: 'Cash and savings', category: 'Cash', value: 32000, note: 'Bank accounts', isSample: true },
@@ -204,16 +221,15 @@ function makeInitialData(): AppData {
       growthReturnRate: 7,
       lastNetWorthUpdated: reviewed.toISOString(),
     },
+    netWorthHistory: [],
     isSample: true,
   }
 }
 
-function loadData(): AppData {
+function normalizeAppData(value: unknown): AppData | null {
   try {
-    const saved = window.localStorage.getItem(STORAGE_KEY)
-    if (!saved) return makeInitialData()
-    const parsed = JSON.parse(saved) as AppData
-    if (!Array.isArray(parsed.holdings) || !parsed.targets || !parsed.settings) return makeInitialData()
+    const parsed = value as AppData
+    if (!parsed || !Array.isArray(parsed.holdings) || !parsed.targets || !parsed.settings) return null
     if (!Array.isArray(parsed.netWorthItems)) parsed.netWorthItems = []
     if (!parsed.dataVersion || parsed.dataVersion < 2) {
       const legacyHoldings = parsed.holdings ?? []
@@ -231,6 +247,11 @@ function loadData(): AppData {
       parsed.settings.currency = BASE_CURRENCY
       parsed.dataVersion = 3
     }
+    if (parsed.dataVersion < 4) {
+      parsed.netWorthHistory = []
+      parsed.dataVersion = 4
+    }
+    if (!Array.isArray(parsed.netWorthHistory)) parsed.netWorthHistory = []
     parsed.settings.cashReturnRate ??= 2
     parsed.settings.incomeReturnRate ??= 4
     parsed.settings.growthReturnRate ??= 7
@@ -243,8 +264,55 @@ function loadData(): AppData {
     }
     return parsed
   } catch {
+    return null
+  }
+}
+
+function loadData(): AppData {
+  try {
+    const saved = window.localStorage.getItem(STORAGE_KEY)
+    if (!saved) return makeInitialData()
+    return normalizeAppData(JSON.parse(saved)) ?? makeInitialData()
+  } catch {
     return makeInitialData()
   }
+}
+
+function currentMonthKey(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+}
+
+function calculateNetWorthSnapshot(items: NetWorthItem[], date = new Date()): NetWorthSnapshot {
+  const assets = items.filter((item) => !isLiabilityCategory(item.category)).reduce((sum, item) => sum + item.value, 0)
+  const liabilities = items.filter((item) => isLiabilityCategory(item.category)).reduce((sum, item) => sum + item.value, 0)
+  return {
+    month: currentMonthKey(date),
+    assets,
+    liabilities,
+    netWorth: assets - liabilities,
+    updatedAt: date.toISOString(),
+  }
+}
+
+function mergeNetWorthSnapshots(...collections: NetWorthSnapshot[][]) {
+  const byMonth = new Map<string, NetWorthSnapshot>()
+  collections.flat().forEach((snapshot) => {
+    const existing = byMonth.get(snapshot.month)
+    if (!existing || new Date(snapshot.updatedAt).getTime() >= new Date(existing.updatedAt).getTime()) {
+      byMonth.set(snapshot.month, snapshot)
+    }
+  })
+  return [...byMonth.values()].sort((a, b) => a.month.localeCompare(b.month))
+}
+
+function snapshotRowsToHistory(rows: Array<{ month: string; assets: number | string; liabilities: number | string; net_worth: number | string; updated_at: string }>): NetWorthSnapshot[] {
+  return rows.map((row) => ({
+    month: row.month.slice(0, 7),
+    assets: Number(row.assets),
+    liabilities: Number(row.liabilities),
+    netWorth: Number(row.net_worth),
+    updatedAt: row.updated_at,
+  }))
 }
 
 function cx(...names: Array<string | false | null | undefined>) {
@@ -261,7 +329,7 @@ function normalizeMoneyText(value: string) {
 }
 
 function moneyInputValue(value: number) {
-  return value > 0 ? String(Math.round(value)) : ''
+  return value > 0 ? Math.round(value).toLocaleString('en-US') : ''
 }
 
 function moneyNumberFromText(value: string) {
@@ -291,10 +359,179 @@ function App() {
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [reminderClock] = useState(currentTimestamp)
   const [toast, setToast] = useState<string | null>(null)
+  const [accountOpen, setAccountOpen] = useState(false)
+  const [authEmail, setAuthEmail] = useState('')
+  const [authMessage, setAuthMessage] = useState<string | null>(null)
+  const [authBusy, setAuthBusy] = useState(false)
+  const [user, setUser] = useState<SupabaseUser | null>(null)
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(isSupabaseConfigured ? 'loading' : 'local')
+  const [syncError, setSyncError] = useState<string | null>(null)
+  const dataWithCurrentSnapshot = useMemo(() => ({
+    ...data,
+    netWorthHistory: mergeNetWorthSnapshots(data.netWorthHistory, [calculateNetWorthSnapshot(data.netWorthItems)]),
+  }), [data])
+  const dataRef = useRef(dataWithCurrentSnapshot)
+  const cloudReadyRef = useRef(false)
+  const skipNextCloudSaveRef = useRef(false)
+  const lastRemoteUpdateRef = useRef<string | null>(null)
 
   useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
-  }, [data])
+    dataRef.current = dataWithCurrentSnapshot
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(dataWithCurrentSnapshot))
+  }, [dataWithCurrentSnapshot])
+
+  useEffect(() => {
+    if (!supabase) return
+    let active = true
+
+    void supabase.auth.getSession().then(({ data: sessionData }) => {
+      if (!active) return
+      const sessionUser = sessionData.session?.user ?? null
+      setUser(sessionUser)
+      setSyncStatus(sessionUser ? 'loading' : 'local')
+      setSyncError(null)
+    })
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!active) return
+      const sessionUser = session?.user ?? null
+      setUser(sessionUser)
+      setSyncStatus(sessionUser ? 'loading' : 'local')
+      setSyncError(null)
+    })
+
+    return () => {
+      active = false
+      authListener.subscription.unsubscribe()
+    }
+  }, [])
+
+  useEffect(() => {
+    cloudReadyRef.current = false
+    lastRemoteUpdateRef.current = null
+    if (!supabase || !user) return
+    const cloud = supabase
+
+    let active = true
+    const hydrateFromCloud = async () => {
+      setSyncStatus('loading')
+      const [portfolioResult, snapshotResult] = await Promise.all([
+        cloud.from('portfolios').select('data, updated_at').eq('user_id', user.id).maybeSingle(),
+        cloud.from('net_worth_snapshots').select('month, assets, liabilities, net_worth, updated_at').eq('user_id', user.id).order('month'),
+      ])
+      if (!active) return
+      if (portfolioResult.error) {
+        setSyncStatus('error')
+        setSyncError(portfolioResult.error.message)
+        return
+      }
+      if (snapshotResult.error) {
+        setSyncStatus('error')
+        setSyncError(snapshotResult.error.message)
+        return
+      }
+
+      const portfolioRow = portfolioResult.data
+      const remoteData = portfolioRow ? normalizeAppData(portfolioRow.data) : null
+      if (remoteData) {
+        remoteData.netWorthHistory = mergeNetWorthSnapshots(remoteData.netWorthHistory, snapshotRowsToHistory(snapshotResult.data ?? []))
+        skipNextCloudSaveRef.current = true
+        lastRemoteUpdateRef.current = portfolioRow!.updated_at
+        setData(remoteData)
+      } else {
+        const now = new Date().toISOString()
+        lastRemoteUpdateRef.current = now
+        const localData = dataRef.current
+        const snapshotRows = localData.netWorthHistory.map((snapshot) => ({
+          user_id: user.id,
+          month: `${snapshot.month}-01`,
+          assets: snapshot.assets,
+          liabilities: snapshot.liabilities,
+          net_worth: snapshot.netWorth,
+          updated_at: snapshot.updatedAt,
+        }))
+        const portfolioWrite = await cloud.from('portfolios').upsert({ user_id: user.id, data: localData, updated_at: now })
+        const snapshotWrite = snapshotRows.length > 0
+          ? await cloud.from('net_worth_snapshots').upsert(snapshotRows, { onConflict: 'user_id,month' })
+          : { error: null }
+        const error = portfolioWrite.error ?? snapshotWrite.error
+        if (error) {
+          setSyncStatus('error')
+          setSyncError(error.message)
+          return
+        }
+      }
+      cloudReadyRef.current = true
+      setSyncStatus('synced')
+    }
+
+    void hydrateFromCloud()
+    return () => {
+      active = false
+    }
+  }, [user])
+
+  useEffect(() => {
+    if (!supabase || !user || !cloudReadyRef.current) return
+    const cloud = supabase
+    if (skipNextCloudSaveRef.current) {
+      skipNextCloudSaveRef.current = false
+      return
+    }
+
+    setSyncStatus('saving')
+    const saveTimer = window.setTimeout(async () => {
+      const updatedAt = new Date().toISOString()
+      lastRemoteUpdateRef.current = updatedAt
+      const snapshotRows = dataWithCurrentSnapshot.netWorthHistory.map((snapshot) => ({
+        user_id: user.id,
+        month: `${snapshot.month}-01`,
+        assets: snapshot.assets,
+        liabilities: snapshot.liabilities,
+        net_worth: snapshot.netWorth,
+        updated_at: snapshot.updatedAt,
+      }))
+      const portfolioResult = await cloud.from('portfolios').upsert({ user_id: user.id, data: dataWithCurrentSnapshot, updated_at: updatedAt })
+      const snapshotResult = snapshotRows.length > 0
+        ? await cloud.from('net_worth_snapshots').upsert(snapshotRows, { onConflict: 'user_id,month' })
+        : { error: null }
+      const error = portfolioResult.error ?? snapshotResult.error
+      if (error) {
+        setSyncStatus('error')
+        setSyncError(error.message)
+      } else {
+        setSyncStatus('synced')
+        setSyncError(null)
+      }
+    }, 700)
+
+    return () => window.clearTimeout(saveTimer)
+  }, [dataWithCurrentSnapshot, user])
+
+  useEffect(() => {
+    if (!supabase || !user) return
+    const cloud = supabase
+    const channel = cloud
+      .channel(`portfolio-sync-${user.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'portfolios', filter: `user_id=eq.${user.id}` }, (payload) => {
+        const row = payload.new as { data?: unknown; updated_at?: string }
+        if (!row.data || !row.updated_at || row.updated_at === lastRemoteUpdateRef.current) return
+        const remoteTimestamp = new Date(row.updated_at).getTime()
+        const localTimestamp = lastRemoteUpdateRef.current ? new Date(lastRemoteUpdateRef.current).getTime() : 0
+        if (remoteTimestamp <= localTimestamp) return
+        const remoteData = normalizeAppData(row.data)
+        if (!remoteData) return
+        lastRemoteUpdateRef.current = row.updated_at
+        skipNextCloudSaveRef.current = true
+        setData(remoteData)
+        setSyncStatus('synced')
+        setSyncError(null)
+      })
+      .subscribe()
+
+    return () => {
+      void cloud.removeChannel(channel)
+    }
+  }, [user])
 
   useEffect(() => {
     let active = true
@@ -420,6 +657,47 @@ function App() {
     }))
   }
 
+  const sendMagicLink = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!supabase || !authEmail.trim()) return
+    setAuthBusy(true)
+    setAuthMessage(null)
+    const { error } = await supabase.auth.signInWithOtp({
+      email: authEmail.trim(),
+      options: { emailRedirectTo: window.location.origin },
+    })
+    setAuthBusy(false)
+    setAuthMessage(error ? error.message : 'Check your email and open the secure sign-in link on this device.')
+  }
+
+  const signOut = async () => {
+    if (!supabase) return
+    setAuthBusy(true)
+    const { error } = await supabase.auth.signOut()
+    setAuthBusy(false)
+    if (error) {
+      setAuthMessage(error.message)
+      return
+    }
+    cloudReadyRef.current = false
+    setAccountOpen(false)
+    setToast('Signed out · data remains saved on this device')
+  }
+
+  const syncStatusLabel = !isSupabaseConfigured
+    ? 'Saved on this device'
+    : !user
+      ? 'Sign in to sync'
+      : syncStatus === 'loading'
+        ? 'Loading cloud data'
+        : syncStatus === 'saving'
+          ? 'Saving changes'
+          : syncStatus === 'synced'
+            ? 'Synced across devices'
+            : syncStatus === 'error'
+              ? 'Sync needs attention'
+              : 'Saved on this device'
+
   const navigate = (destination: Page) => {
     setPage(destination)
     setMobileNavOpen(false)
@@ -489,6 +767,7 @@ function App() {
         return (
           <NetWorthPage
             items={data.netWorthItems}
+            history={dataWithCurrentSnapshot.netWorthHistory}
             portfolioTotal={0}
             formatMoney={formatMoney}
             onAdd={() => setEditingNetWorthItem(null)}
@@ -573,13 +852,13 @@ function App() {
         <div className="sidebar__footer">
           <div className="privacy-note">
             <ShieldCheck size={17} />
-            <div><strong>Private by default</strong><span>Saved on this device</span></div>
+            <div><strong>Private by default</strong><span>{user ? 'Protected cloud sync' : 'Saved on this device'}</span></div>
           </div>
-          <div className="profile-chip">
-            <div className="avatar">KW</div>
-            <div><strong>My portfolio</strong><span>{data.settings.riskProfile} plan</span></div>
-            <MoreHorizontal size={17} />
-          </div>
+          <button type="button" className="profile-chip" onClick={() => setAccountOpen(true)}>
+            <div className="avatar">{user?.email?.slice(0, 2).toUpperCase() ?? 'ME'}</div>
+            <div><strong>{user?.email ?? 'My portfolio'}</strong><span>{syncStatusLabel}</span></div>
+            {user && syncStatus !== 'error' ? <Cloud size={17} /> : syncStatus === 'error' ? <CloudOff size={17} /> : <MoreHorizontal size={17} />}
+          </button>
         </div>
       </aside>
 
@@ -680,6 +959,26 @@ function App() {
         />
       )}
 
+      {accountOpen && (
+        <AccountModal
+          configured={isSupabaseConfigured}
+          user={user}
+          syncStatus={syncStatus}
+          syncStatusLabel={syncStatusLabel}
+          syncError={syncError}
+          email={authEmail}
+          message={authMessage}
+          busy={authBusy}
+          onEmailChange={setAuthEmail}
+          onSubmit={sendMagicLink}
+          onSignOut={signOut}
+          onClose={() => {
+            setAccountOpen(false)
+            setAuthMessage(null)
+          }}
+        />
+      )}
+
       {toast && <div className="toast"><Check size={17} />{toast}</div>}
     </div>
   )
@@ -710,8 +1009,9 @@ function isLiabilityCategory(category: NetWorthCategory) {
   return LIABILITY_CATEGORIES.includes(category)
 }
 
-function NetWorthPage({ items, portfolioTotal, formatMoney, onAdd, onEdit, onClearSample, onNavigate }: {
+function NetWorthPage({ items, history, portfolioTotal, formatMoney, onAdd, onEdit, onClearSample, onNavigate }: {
   items: NetWorthItem[]
+  history: NetWorthSnapshot[]
   portfolioTotal: number
   formatMoney: (value: number, compact?: boolean) => string
   onAdd: () => void
@@ -765,6 +1065,8 @@ function NetWorthPage({ items, portfolioTotal, formatMoney, onAdd, onEdit, onCle
         <MetricCard label="Investable assets" value={formatMoney(investableAssets)} helper="Cash, stocks, funds, bonds, and deposits" icon={TrendingUp} tone="blue" />
       </section>
 
+      <NetWorthHistoryCard history={history} formatMoney={formatMoney} />
+
       <section className="net-worth-grid">
         <div className="card net-worth-composition">
           <CardHeader eyebrow="What you own" title="Asset composition" action={<button className="text-button" onClick={() => onNavigate('allocation')}>Organize assets <ArrowRight size={15} /></button>} />
@@ -808,6 +1110,9 @@ function NetWorthPage({ items, portfolioTotal, formatMoney, onAdd, onEdit, onCle
             const liability = isLiabilityCategory(group.category)
             const subtotal = group.items.reduce((sum, item) => sum + item.value, 0)
             const meta = NET_WORTH_META[group.category]
+            if (group.items.length === 1) {
+              return <SingleBalanceRow key={group.category} item={group.items[0]} formatMoney={formatMoney} onEdit={onEdit} />
+            }
             return (
               <div className="balance-group" key={group.category}>
                 <div className="balance-group__header">
@@ -818,7 +1123,7 @@ function NetWorthPage({ items, portfolioTotal, formatMoney, onAdd, onEdit, onCle
                   <strong className={cx(liability && 'negative')}>{liability ? '− ' : ''}{formatMoney(subtotal)}</strong>
                 </div>
                 <div className="balance-group__items">
-                  {group.items.map((item) => <BalanceRow grouped key={item.id} item={item} formatMoney={formatMoney} onEdit={onEdit} />)}
+                  {group.items.map((item) => <BalanceRow key={item.id} item={item} formatMoney={formatMoney} onEdit={onEdit} />)}
                 </div>
               </div>
             )
@@ -827,9 +1132,91 @@ function NetWorthPage({ items, portfolioTotal, formatMoney, onAdd, onEdit, onCle
         </div>
       </section>
 
-      <div className="double-count-note"><ShieldCheck size={18} /><div><strong>Enter one total for each asset group</strong><span>For example, combine all stock accounts into “Stocks / funds.” Record a condo’s current value as an asset and its outstanding mortgage as a separate liability.</span></div></div>
+      <div className="double-count-note"><ShieldCheck size={18} /><div><strong>Add each account or property once</strong><span>Category totals are calculated automatically. Record a condo’s current value as an asset and its outstanding mortgage as a separate liability.</span></div></div>
     </>
   )
+}
+
+function NetWorthHistoryCard({ history, formatMoney }: { history: NetWorthSnapshot[]; formatMoney: (value: number, compact?: boolean) => string }) {
+  const visibleHistory = history.slice(-12)
+  const latest = visibleHistory.at(-1)
+  const previous = visibleHistory.at(-2)
+  const change = latest && previous ? latest.netWorth - previous.netWorth : null
+  const changePercent = change !== null && previous && previous.netWorth !== 0 ? (change / Math.abs(previous.netWorth)) * 100 : null
+  const values = visibleHistory.map((snapshot) => snapshot.netWorth)
+  const chartWidth = 880
+  const chartHeight = 260
+  const chartLeft = 82
+  const chartRight = 24
+  const chartTop = 24
+  const chartBottom = 34
+  const rawMinimum = Math.min(...values)
+  const rawMaximum = Math.max(...values)
+  const chartBuffer = Math.max((rawMaximum - rawMinimum) * .15, Math.abs(rawMaximum) * .04, 1)
+  const minimum = rawMinimum - chartBuffer
+  const maximum = rawMaximum + chartBuffer
+  const range = Math.max(1, maximum - minimum)
+  const points = visibleHistory.map((snapshot, index) => {
+    const x = visibleHistory.length === 1 ? chartWidth / 2 : chartLeft + (index / (visibleHistory.length - 1)) * (chartWidth - chartLeft - chartRight)
+    const y = chartTop + ((maximum - snapshot.netWorth) / range) * (chartHeight - chartTop - chartBottom)
+    return { ...snapshot, x, y }
+  })
+  const labelEvery = Math.max(1, Math.ceil(visibleHistory.length / 6))
+  const gridLevels = [0, .5, 1].map((position) => ({
+    position,
+    y: chartTop + position * (chartHeight - chartTop - chartBottom),
+    value: maximum - position * range,
+  }))
+  const chartFloor = chartHeight - chartBottom
+  const areaPoints = points.length > 1 ? `${points[0].x},${chartFloor} ${points.map((point) => `${point.x},${point.y}`).join(' ')} ${points.at(-1)!.x},${chartFloor}` : ''
+
+  return (
+    <section className="card history-card">
+      <div className="history-card__header">
+        <CardHeader eyebrow="Progress over time" title="Monthly net-worth history" />
+        <span className="history-auto-chip"><CalendarClock size={14} /> Saved automatically</span>
+      </div>
+      {latest ? (
+        visibleHistory.length === 1 ? (
+          <div className="history-start">
+            <div className="history-start__primary"><span>Starting point · {formatSnapshotMonth(latest.month, true)}</span><strong>{formatMoney(latest.netWorth)}</strong><small>Net worth</small></div>
+            <div className="history-start__breakdown"><div><span>Total assets</span><strong>{formatMoney(latest.assets)}</strong></div><div><span>Total liabilities</span><strong>{formatMoney(latest.liabilities)}</strong></div></div>
+            <div className="history-start__next"><span className="history-start__dot"><Check size={15} /></span><i /><span className="history-start__calendar"><CalendarClock size={17} /></span><div><strong>Next point: {formatSnapshotMonth(nextSnapshotMonth(latest.month), true)}</strong><span>Update your balances next month to reveal your first trend.</span></div></div>
+          </div>
+        ) : (
+          <>
+            <div className="history-stats">
+              <div><span>Latest net worth</span><strong>{formatMoney(latest.netWorth)}</strong></div>
+              <div><span>Monthly change</span><strong className={cx(change !== null && change < 0 && 'negative')}>{change !== null && change >= 0 ? <ArrowUpRight size={16} /> : <ArrowDownRight size={16} />}{change === null ? '—' : `${change >= 0 ? '+' : '−'}${formatMoney(Math.abs(change))}`}</strong>{changePercent !== null && <small>{changePercent >= 0 ? '+' : ''}{changePercent.toFixed(1)}%</small>}</div>
+              <div><span>Total assets</span><strong>{formatMoney(latest.assets)}</strong></div>
+              <div><span>Total liabilities</span><strong>{formatMoney(latest.liabilities)}</strong></div>
+            </div>
+            <div className="history-chart" role="img" aria-label={visibleHistory.map((snapshot) => `${formatSnapshotMonth(snapshot.month)} net worth ${formatMoney(snapshot.netWorth)}`).join(', ')}>
+              <div className="history-chart__legend"><span><i /> Net worth</span><small>{visibleHistory.length} monthly snapshots · latest 12 months</small></div>
+              <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} aria-hidden="true">
+                <defs><linearGradient id="history-area-gradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#5f9a85" stopOpacity=".28" /><stop offset="100%" stopColor="#5f9a85" stopOpacity=".02" /></linearGradient></defs>
+                {gridLevels.map((level) => <g key={level.position}><line x1={chartLeft} x2={chartWidth - chartRight} y1={level.y} y2={level.y} className="history-grid-line" /><text x={chartLeft - 11} y={level.y + 4} textAnchor="end" className="history-axis-label">{formatMoney(level.value, true)}</text></g>)}
+                {minimum < 0 && maximum > 0 && <line x1={chartLeft} x2={chartWidth - chartRight} y1={chartTop + (maximum / range) * (chartHeight - chartTop - chartBottom)} y2={chartTop + (maximum / range) * (chartHeight - chartTop - chartBottom)} className="history-zero-line" />}
+                <polygon points={areaPoints} className="history-area" />
+                <polyline points={points.map((point) => `${point.x},${point.y}`).join(' ')} className="history-line" />
+                {points.map((point, index) => <g key={point.month}><circle cx={point.x} cy={point.y} r={index === points.length - 1 ? 6 : 4} className={cx('history-point', index === points.length - 1 && 'history-point--latest')}><title>{formatSnapshotMonth(point.month, true)} · {formatMoney(point.netWorth)}</title></circle>{(index % labelEvery === 0 || index === points.length - 1) && <text x={point.x} y={chartHeight - 8} textAnchor={index === 0 ? 'start' : index === points.length - 1 ? 'end' : 'middle'} className="history-month-label">{formatSnapshotMonth(point.month)}</text>}</g>)}
+              </svg>
+            </div>
+          </>
+        )
+      ) : <div className="history-empty"><CalendarClock size={22} /><div><strong>Your history starts this month</strong><span>Steady will keep one snapshot for each month when you update your balances.</span></div></div>}
+    </section>
+  )
+}
+
+function formatSnapshotMonth(month: string, longYear = false) {
+  return new Date(`${month}-01T00:00:00`).toLocaleDateString('en-US', { month: 'short', year: longYear ? 'numeric' : '2-digit' })
+}
+
+function nextSnapshotMonth(month: string) {
+  const date = new Date(`${month}-01T00:00:00`)
+  date.setMonth(date.getMonth() + 1)
+  return currentMonthKey(date)
 }
 
 function CategoryIcon({ category, size = 18 }: { category: NetWorthCategory; size?: number }) {
@@ -841,12 +1228,29 @@ function CategoryIcon({ category, size = 18 }: { category: NetWorthCategory; siz
   return <CircleDollarSign size={size} />
 }
 
-function BalanceRow({ item, formatMoney, onEdit, grouped = false }: { item: NetWorthItem; formatMoney: (value: number) => string; onEdit: (item: NetWorthItem) => void; grouped?: boolean }) {
+function SingleBalanceRow({ item, formatMoney, onEdit }: { item: NetWorthItem; formatMoney: (value: number) => string; onEdit: (item: NetWorthItem) => void }) {
+  const liability = isLiabilityCategory(item.category)
+  const meta = NET_WORTH_META[item.category]
+  return (
+    <div className={cx('balance-single', liability && 'balance-single--liability')}>
+      <span className="balance-single__icon" style={{ color: meta.color, background: meta.soft }}><CategoryIcon category={item.category} size={17} /></span>
+      <div className="balance-single__content">
+        <span>{item.category}{liability ? ' · Liability' : ''}</span>
+        <strong>{item.name}</strong>
+        {item.note && <small>{item.note}</small>}
+      </div>
+      <strong className={cx('balance-value', liability && 'balance-value--debt')}>{liability ? '− ' : ''}{formatMoney(item.value)}</strong>
+      <button className="icon-button icon-button--small" aria-label={`Edit ${item.name}`} onClick={() => onEdit(item)}><Pencil size={15} /></button>
+    </div>
+  )
+}
+
+function BalanceRow({ item, formatMoney, onEdit }: { item: NetWorthItem; formatMoney: (value: number) => string; onEdit: (item: NetWorthItem) => void }) {
   const liability = isLiabilityCategory(item.category)
   return (
-    <div className="balance-row">
-      <div className="balance-name"><strong>{item.name}</strong><span>{grouped ? (item.note || 'No note added') : `${item.category}${item.note ? ` · ${item.note}` : ''}`}</span></div>
-      <span className={cx('balance-kind', liability ? 'balance-kind--debt' : 'balance-kind--asset')}>{liability ? 'Liability' : 'Asset'}</span>
+    <div className={cx('balance-row', liability ? 'balance-row--liability' : 'balance-row--asset')}>
+      <div className="balance-name"><strong>{item.name}</strong>{item.note && <span>{item.note}</span>}</div>
+      {liability && <span className="balance-kind balance-kind--debt">Liability</span>}
       <strong className={cx('balance-value', liability && 'balance-value--debt')}>{liability ? '− ' : ''}{formatMoney(item.value)}</strong>
       <button className="icon-button icon-button--small" aria-label={`Edit ${item.name}`} onClick={() => onEdit(item)}><Pencil size={15} /></button>
     </div>
@@ -1194,7 +1598,7 @@ function AssetPlanPage({ items, settings, formatMoney, updateSettings, onNavigat
             <RateInput label="Income rate" value={settings.incomeReturnRate} onChange={(value) => updateSettings('incomeReturnRate', value)} />
             <RateInput label="Growth return" value={settings.growthReturnRate} onChange={(value) => updateSettings('growthReturnRate', value)} />
           </div>
-          <label className="field"><span>Monthly contribution (THB)</span><div className="money-input"><span>{currencySymbol(BASE_CURRENCY)}</span><input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={moneyInputValue(settings.monthlyContribution)} onChange={(event) => updateSettings('monthlyContribution', moneyNumberFromText(event.target.value))} /></div></label>
+          <label className="field"><span>Monthly contribution (THB)</span><div className="money-input"><span>{currencySymbol(BASE_CURRENCY)}</span><input type="text" inputMode="numeric" pattern="[0-9,]*" placeholder="0" value={moneyInputValue(settings.monthlyContribution)} onChange={(event) => updateSettings('monthlyContribution', moneyNumberFromText(event.target.value))} /></div></label>
           <div className="projection-box">
             <div><span>Today</span><strong>{formatMoney(investable)}</strong></div>
             <ArrowRight size={16} />
@@ -1422,7 +1826,11 @@ function PlanPage({ data, cash, total, formatMoney, updateSettings }: {
       <PageHeading eyebrow="Before chasing returns" title="Financial Health" copy="Connect your portfolio to the habits and safeguards that make long-term investing sustainable." />
 
       <section className="plan-hero">
-        <div><span>Foundation score</span><strong>{readiness}<small>/100</small></strong><p>Based on the four planning inputs below—not market performance.</p></div>
+        <div className="plan-hero__score">
+          <span>Foundation score</span>
+          <div><strong>{readiness}</strong><small>/100</small></div>
+          <p>Based on the four planning inputs below—not market performance.</p>
+        </div>
         <div className="plan-hero__bar"><span style={{ width: `${readiness}%` }} /></div>
         <div className="plan-hero__message"><ShieldCheck size={20} /><div><strong>{readiness >= 75 ? 'Your habits are doing the heavy lifting.' : 'A few fundamentals need attention.'}</strong><span>Keep the system simple enough to follow through every market cycle.</span></div></div>
       </section>
@@ -1434,14 +1842,14 @@ function PlanPage({ data, cash, total, formatMoney, updateSettings }: {
             <div><strong>{cashMonths.toFixed(1)} months saved</strong><span>{formatMoney(cash)} of {formatMoney(reserveGoal)}</span></div>
             <div><span style={{ width: `${reserveProgress}%` }} /></div>
           </div>
-          <label className="field"><span>Essential spending per month (THB)</span><div className="money-input"><span>{currencySymbol(BASE_CURRENCY)}</span><input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={moneyInputValue(settings.monthlyEssentials)} onChange={(event) => updateSettings('monthlyEssentials', moneyNumberFromText(event.target.value))} /></div></label>
+          <label className="field"><span>Essential spending per month (THB)</span><div className="money-input"><span>{currencySymbol(BASE_CURRENCY)}</span><input type="text" inputMode="numeric" pattern="[0-9,]*" placeholder="0" value={moneyInputValue(settings.monthlyEssentials)} onChange={(event) => updateSettings('monthlyEssentials', moneyNumberFromText(event.target.value))} /></div></label>
           <label className="field"><span>Reserve target</span><div className="range-value"><input type="range" min="1" max="12" value={settings.emergencyTargetMonths} onChange={(event) => updateSettings('emergencyTargetMonths', Number(event.target.value))} /><strong>{settings.emergencyTargetMonths} months</strong></div></label>
         </section>
 
         <section className="card plan-card">
           <div className="plan-card__top"><div className="plan-icon plan-icon--sand"><TrendingUp size={19} /></div><div><span>02 · Consistency</span><h2>Saving & investing</h2></div></div>
           <label className="field"><span>Savings rate</span><div className="range-value"><input type="range" min="0" max="80" value={settings.savingsRate} onChange={(event) => updateSettings('savingsRate', Number(event.target.value))} /><strong>{settings.savingsRate}%</strong></div></label>
-          <label className="field"><span>Monthly portfolio contribution (THB)</span><div className="money-input"><span>{currencySymbol(BASE_CURRENCY)}</span><input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={moneyInputValue(settings.monthlyContribution)} onChange={(event) => updateSettings('monthlyContribution', moneyNumberFromText(event.target.value))} /></div></label>
+          <label className="field"><span>Monthly portfolio contribution (THB)</span><div className="money-input"><span>{currencySymbol(BASE_CURRENCY)}</span><input type="text" inputMode="numeric" pattern="[0-9,]*" placeholder="0" value={moneyInputValue(settings.monthlyContribution)} onChange={(event) => updateSettings('monthlyContribution', moneyNumberFromText(event.target.value))} /></div></label>
           <ToggleRow label="Automatic contributions" copy="Reduce the need for monthly willpower" checked={settings.autoContributions} onChange={(value) => updateSettings('autoContributions', value)} />
         </section>
 
@@ -1460,7 +1868,7 @@ function PlanPage({ data, cash, total, formatMoney, updateSettings }: {
           </div>
           <label className="field"><span>Goal name</span><input type="text" value={settings.goalName} onChange={(event) => updateSettings('goalName', event.target.value)} /></label>
           <div className="two-fields">
-            <label className="field"><span>Target amount (THB)</span><input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={moneyInputValue(settings.goalAmount)} onChange={(event) => updateSettings('goalAmount', moneyNumberFromText(event.target.value))} /></label>
+            <label className="field"><span>Target amount (THB)</span><input type="text" inputMode="numeric" pattern="[0-9,]*" placeholder="0" value={moneyInputValue(settings.goalAmount)} onChange={(event) => updateSettings('goalAmount', moneyNumberFromText(event.target.value))} /></label>
             <label className="field"><span>Target year</span><input type="number" min={new Date().getFullYear()} max="2200" value={settings.goalYear} onChange={(event) => updateSettings('goalYear', Number(event.target.value))} /></label>
           </div>
         </section>
@@ -1490,6 +1898,53 @@ function currencySymbol(currency: string) {
 
 function currencyLocale(currency: string) {
   return currency === 'THB' ? 'th-TH' : 'en-US'
+}
+
+function AccountModal({ configured, user, syncStatus, syncStatusLabel, syncError, email, message, busy, onEmailChange, onSubmit, onSignOut, onClose }: {
+  configured: boolean
+  user: SupabaseUser | null
+  syncStatus: SyncStatus
+  syncStatusLabel: string
+  syncError: string | null
+  email: string
+  message: string | null
+  busy: boolean
+  onEmailChange: (value: string) => void
+  onSubmit: (event: FormEvent) => void
+  onSignOut: () => void
+  onClose: () => void
+}) {
+  return (
+    <div className="modal-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="account-modal-title">
+        <div className="modal__header"><div><span>Private account</span><h2 id="account-modal-title">Sync your portfolio</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
+        {!configured ? (
+          <div className="account-setup">
+            <div className="account-state account-state--local"><CloudOff size={20} /><div><strong>Local mode is active</strong><span>Your portfolio is still safely available in this browser.</span></div></div>
+            <p>To enable cross-device sync, create a Supabase project, run <code>supabase/schema.sql</code>, and add the project URL and publishable key to <code>.env.local</code>.</p>
+          </div>
+        ) : user ? (
+          <div className="account-signed-in">
+            <div className={cx('account-state', syncStatus === 'error' && 'account-state--error')}>
+              {syncStatus === 'error' ? <CloudOff size={20} /> : <Cloud size={20} />}
+              <div><strong>{syncStatusLabel}</strong><span>{user.email}</span></div>
+            </div>
+            {syncError && <div className="auth-message auth-message--error">{syncError}</div>}
+            <p>Changes are also saved locally. When online, Steady updates your private cloud portfolio and monthly history.</p>
+            <button className="button button--secondary button--full" type="button" disabled={busy} onClick={onSignOut}><LogOut size={16} /> Sign out</button>
+          </div>
+        ) : (
+          <form className="account-sign-in" onSubmit={onSubmit}>
+            <div className="account-state"><Cloud size={20} /><div><strong>Use the same portfolio everywhere</strong><span>Sign in by secure email link—no password to remember.</span></div></div>
+            <label className="field"><span>Email address</span><div className="auth-email-input"><Mail size={17} /><input type="email" autoComplete="email" placeholder="you@example.com" value={email} onChange={(event) => onEmailChange(event.target.value)} required /></div></label>
+            {message && <div className={cx('auth-message', message.toLowerCase().includes('check your email') ? 'auth-message--success' : 'auth-message--error')}>{message}</div>}
+            <button className="button button--primary button--full" type="submit" disabled={busy}>{busy ? 'Sending secure link…' : 'Email me a sign-in link'}</button>
+            <p className="account-privacy"><ShieldCheck size={15} />Only your signed-in user can read or change these records.</p>
+          </form>
+        )}
+      </div>
+    </div>
+  )
 }
 
 function EmptyState({ icon: Icon, title, copy, action, onAction }: { icon: LucideIcon; title: string; copy: string; action: string; onAction: () => void }) {
@@ -1537,11 +1992,11 @@ function NetWorthItemModal({ item, currency, onClose, onSave, onDelete }: {
           </div>
           <div className="two-fields">
             <label className="field"><span>Name</span><input autoFocus placeholder={kind === 'asset' ? 'e.g. Primary condo' : 'e.g. Condo mortgage'} value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} required /></label>
-            <label className="field"><span>Current value ({currency})</span><input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={moneyInputValue(form.value)} onChange={(event) => setForm((current) => ({ ...current, value: moneyNumberFromText(event.target.value) }))} required /></label>
+            <label className="field"><span>Current value in {currency}</span><div className="money-input money-input--emphasis"><span>{currencySymbol(currency)}</span><input type="text" inputMode="numeric" pattern="[0-9,]*" placeholder="2,050,000" value={moneyInputValue(form.value)} onChange={(event) => setForm((current) => ({ ...current, value: moneyNumberFromText(event.target.value) }))} required /></div><small className="field-hint">This number is used in your net worth.</small></label>
           </div>
           <label className="field"><span>Category</span><select value={form.category} onChange={(event) => setForm((current) => ({ ...current, category: event.target.value as NetWorthCategory }))}>{categories.map((category) => <option key={category}>{category}</option>)}</select></label>
-          <label className="field"><span>Note or account</span><input placeholder="e.g. Estimated market value" value={form.note} onChange={(event) => setForm((current) => ({ ...current, note: event.target.value }))} /></label>
-          <div className="modal-guidance"><ShieldCheck size={16} /><span>Enter a combined total for this asset group. You do not need to list individual stocks, funds, or bank accounts.</span></div>
+          <label className="field"><span>Optional note</span><input placeholder="e.g. Valued August 2026 — do not enter the amount here" value={form.note} onChange={(event) => setForm((current) => ({ ...current, note: event.target.value }))} /></label>
+          <div className="modal-guidance"><ShieldCheck size={16} /><span>Add each account or property once. Items in the same category are totalled automatically.</span></div>
           <div className="modal__actions">
             {item && <button type="button" className="button button--danger" onClick={() => window.confirm(`Remove ${item.name} from your net worth?`) && onDelete(item.id)}><Trash2 size={16} />Remove</button>}
             <div className="modal__actions-right"><button type="button" className="button button--secondary" onClick={onClose}>Cancel</button><button type="submit" className="button button--primary">{item ? 'Save changes' : `Add ${kind}`}</button></div>
@@ -1581,7 +2036,7 @@ function HoldingModal({ holding, currency, onClose, onSave, onDelete }: {
         <form onSubmit={submit}>
           <div className="two-fields">
             <label className="field"><span>Ticker / symbol</span><input autoFocus placeholder="e.g. VTI" maxLength={12} value={form.ticker} onChange={(event) => setForm((current) => ({ ...current, ticker: event.target.value }))} required /></label>
-            <label className="field"><span>Current value ({currency})</span><input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={moneyInputValue(form.value)} onChange={(event) => setForm((current) => ({ ...current, value: moneyNumberFromText(event.target.value) }))} required /></label>
+            <label className="field"><span>Current value ({currency})</span><input type="text" inputMode="numeric" pattern="[0-9,]*" placeholder="0" value={moneyInputValue(form.value)} onChange={(event) => setForm((current) => ({ ...current, value: moneyNumberFromText(event.target.value) }))} required /></label>
           </div>
           <label className="field"><span>Holding name</span><input placeholder="e.g. Total US Stock Market" value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} required /></label>
           <div className="two-fields">
