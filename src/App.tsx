@@ -8,6 +8,7 @@ import {
   Banknote,
   BarChart3,
   Bell,
+  Briefcase,
   Building2,
   CalendarClock,
   Check,
@@ -19,7 +20,6 @@ import {
   Download,
   Eye,
   EyeOff,
-  FilePenLine,
   HeartPulse,
   Landmark,
   LogOut,
@@ -43,7 +43,7 @@ import {
 } from 'lucide-react'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 
-type Page = 'networth' | 'overview' | 'allocation' | 'holdings' | 'plan'
+type Page = 'networth' | 'income' | 'overview' | 'allocation' | 'holdings' | 'plan'
 type AssetClass = 'US equity' | 'International equity' | 'Fixed income' | 'Cash' | 'Real assets'
 type NetWorthCategory = 'Cash' | 'Stocks / funds' | 'Bonds / deposits' | 'Property' | 'Vehicle' | 'Other asset' | 'Mortgage' | 'Loan' | 'Credit card' | 'Other liability'
 type CurrencyCode = 'THB' | 'USD' | 'AUD'
@@ -73,6 +73,16 @@ type NetWorthSnapshot = {
   liabilities: number
   netWorth: number
   updatedAt: string
+}
+
+type IncomePeriod = {
+  id: string
+  company: string
+  role: string
+  monthlyIncome: number
+  startMonth: string
+  endMonth: string
+  note: string
 }
 
 type AppSettings = {
@@ -112,6 +122,7 @@ type AppData = {
   targets: Record<AssetClass, number>
   settings: AppSettings
   netWorthHistory: NetWorthSnapshot[]
+  incomePeriods: IncomePeriod[]
   isSample: boolean
 }
 
@@ -150,8 +161,9 @@ const NET_WORTH_META: Record<NetWorthCategory | 'Investment portfolio', { color:
 const ASSET_CATEGORIES: NetWorthCategory[] = ['Cash', 'Stocks / funds', 'Bonds / deposits', 'Property', 'Vehicle', 'Other asset']
 const LIABILITY_CATEGORIES: NetWorthCategory[] = ['Mortgage', 'Loan', 'Credit card', 'Other liability']
 
-const NAV_ITEMS: Array<{ id: Page; label: string; shortLabel: string; icon: LucideIcon; tone: 'gold' | 'mint' | 'coral' }> = [
+const NAV_ITEMS: Array<{ id: Page; label: string; shortLabel: string; icon: LucideIcon; tone: 'gold' | 'mint' | 'coral' | 'blue' }> = [
   { id: 'networth', label: 'Net Worth', shortLabel: 'Net Worth', icon: WalletCards, tone: 'gold' },
+  { id: 'income', label: 'Income Progress', shortLabel: 'Income', icon: Briefcase, tone: 'blue' },
   { id: 'allocation', label: 'Investment Plan', shortLabel: 'Invest', icon: TrendingUp, tone: 'mint' },
   { id: 'plan', label: 'Financial Health', shortLabel: 'Health', icon: HeartPulse, tone: 'coral' },
 ]
@@ -186,7 +198,7 @@ function makeInitialData(): AppData {
   const reviewed = new Date()
   reviewed.setDate(reviewed.getDate() - 60)
   return {
-    dataVersion: 4,
+    dataVersion: 5,
     holdings: [],
     netWorthItems: [
       { id: 'sample-cash', name: 'Cash and savings', category: 'Cash', value: 32000, note: 'Bank accounts', isSample: true },
@@ -222,6 +234,7 @@ function makeInitialData(): AppData {
       lastNetWorthUpdated: reviewed.toISOString(),
     },
     netWorthHistory: [],
+    incomePeriods: [],
     isSample: true,
   }
 }
@@ -252,6 +265,11 @@ function normalizeAppData(value: unknown): AppData | null {
       parsed.dataVersion = 4
     }
     if (!Array.isArray(parsed.netWorthHistory)) parsed.netWorthHistory = []
+    if (parsed.dataVersion < 5) {
+      parsed.incomePeriods = []
+      parsed.dataVersion = 5
+    }
+    if (!Array.isArray(parsed.incomePeriods)) parsed.incomePeriods = []
     parsed.settings.cashReturnRate ??= 2
     parsed.settings.incomeReturnRate ??= 4
     parsed.settings.growthReturnRate ??= 7
@@ -356,6 +374,7 @@ function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [editingHolding, setEditingHolding] = useState<Holding | null | undefined>(undefined)
   const [editingNetWorthItem, setEditingNetWorthItem] = useState<NetWorthItem | null | undefined>(undefined)
+  const [editingIncomePeriod, setEditingIncomePeriod] = useState<IncomePeriod | null | undefined>(undefined)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [reminderClock] = useState(currentTimestamp)
   const [toast, setToast] = useState<string | null>(null)
@@ -755,6 +774,23 @@ function App() {
     setToast('Sample net-worth items cleared')
   }
 
+  const saveIncomePeriod = (period: IncomePeriod) => {
+    setData((current) => ({
+      ...current,
+      incomePeriods: current.incomePeriods.some((item) => item.id === period.id)
+        ? current.incomePeriods.map((item) => item.id === period.id ? period : item)
+        : [...current.incomePeriods, period],
+    }))
+    setEditingIncomePeriod(undefined)
+    setToast(editingIncomePeriod ? 'Income period updated' : 'Income period added')
+  }
+
+  const deleteIncomePeriod = (id: string) => {
+    setData((current) => ({ ...current, incomePeriods: current.incomePeriods.filter((item) => item.id !== id) }))
+    setEditingIncomePeriod(undefined)
+    setToast('Income period removed')
+  }
+
   const completeReminder = (reminder: Reminder) => {
     if (reminder.id === 'monthly-update') updateSettings('lastNetWorthUpdated', new Date().toISOString())
     if (reminder.id === 'asset-review') updateSettings('lastReviewed', new Date().toISOString())
@@ -784,6 +820,15 @@ function App() {
             formatMoney={formatMoney}
             updateSettings={updateSettings}
             onNavigate={navigate}
+          />
+        )
+      case 'income':
+        return (
+          <IncomePage
+            periods={data.incomePeriods}
+            formatMoney={formatMoney}
+            onAdd={() => setEditingIncomePeriod(null)}
+            onEdit={setEditingIncomePeriod}
           />
         )
       case 'holdings':
@@ -956,6 +1001,15 @@ function App() {
           onClose={() => setEditingNetWorthItem(undefined)}
           onSave={saveNetWorthItem}
           onDelete={deleteNetWorthItem}
+        />
+      )}
+
+      {editingIncomePeriod !== undefined && (
+        <IncomePeriodModal
+          period={editingIncomePeriod}
+          onClose={() => setEditingIncomePeriod(undefined)}
+          onSave={saveIncomePeriod}
+          onDelete={deleteIncomePeriod}
         />
       )}
 
@@ -1873,17 +1927,132 @@ function PlanPage({ data, cash, total, formatMoney, updateSettings }: {
           </div>
         </section>
       </div>
-
-      <section className="education-note">
-        <div><FilePenLine size={20} /><strong>Keep this plan personal</strong></div>
-        <p>Asset allocation depends on your goals, time horizon, ability and willingness to accept losses, taxes, and liquidity needs. Steady is an educational planning tool, not personalized investment, tax, or legal advice.</p>
-        <div className="source-links">
-          <a href="https://www.investor.gov/introduction-investing/getting-started/asset-allocation" target="_blank" rel="noreferrer">Investor.gov: allocation & diversification <ArrowRight size={14} /></a>
-          <a href="https://www.consumerfinance.gov/an-essential-guide-to-building-an-emergency-fund/" target="_blank" rel="noreferrer">CFPB: emergency savings <ArrowRight size={14} /></a>
-        </div>
-      </section>
     </>
   )
+}
+
+function IncomePage({ periods, formatMoney, onAdd, onEdit }: {
+  periods: IncomePeriod[]
+  formatMoney: (value: number, compact?: boolean) => string
+  onAdd: () => void
+  onEdit: (period: IncomePeriod) => void
+}) {
+  const currentMonth = currentMonthKey()
+  const ordered = [...periods].sort((a, b) => a.startMonth.localeCompare(b.startMonth))
+  const currentPeriods = ordered.filter((period) => !period.endMonth || period.endMonth >= currentMonth)
+  const currentIncome = currentPeriods.reduce((sum, period) => sum + period.monthlyIncome, 0)
+  const latestIncome = currentIncome || ordered.at(-1)?.monthlyIncome || 0
+  const firstIncome = ordered[0]?.monthlyIncome ?? 0
+  const growth = firstIncome > 0 ? ((latestIncome - firstIncome) / firstIncome) * 100 : 0
+
+  return (
+    <>
+      <PageHeading
+        eyebrow="Career & earning history"
+        title="Income Progress"
+        copy="See how your monthly income has changed across companies and roles. All entries use gross monthly income in THB for a consistent comparison."
+        actions={<button className="button button--primary" onClick={onAdd}><Plus size={16} /> Add job or income</button>}
+      />
+      {ordered.length > 0 ? (
+        <>
+          <div className="income-summary">
+            <div><span>{currentPeriods.length > 0 ? 'Current monthly income' : 'Latest monthly income'}</span><strong>{formatMoney(latestIncome)}</strong><small>{currentPeriods.length > 1 ? `${currentPeriods.length} current income sources` : currentPeriods.length === 1 ? 'Current role' : 'No current role marked'}</small></div>
+            <div><span>Annualized income</span><strong>{formatMoney(latestIncome * 12)}</strong><small>Monthly income × 12, before bonuses</small></div>
+            <div><span>Growth from first record</span><strong className={cx(growth < 0 && 'negative')}>{growth >= 0 ? '+' : ''}{growth.toFixed(1)}%</strong><small>{ordered.length} job period{ordered.length === 1 ? '' : 's'} tracked</small></div>
+          </div>
+          <IncomeProgressChart periods={ordered} formatMoney={formatMoney} />
+          <section className="card income-timeline-card">
+            <CardHeader eyebrow="Companies & roles" title="Employment timeline" />
+            <p className="section-intro">Your work history from newest to oldest, with the salary recorded for each period.</p>
+            <div className="income-timeline" aria-label="Employment and income history">
+              {[...ordered].reverse().map((period, index) => {
+                const isCurrent = !period.endMonth || period.endMonth >= currentMonth
+                return (
+                  <div className="income-row" key={period.id}>
+                    <div className="income-row__track"><span className={cx(isCurrent && 'current')} />{index < ordered.length - 1 && <i />}</div>
+                    <div className="income-row__identity"><strong>{period.role}</strong><span>{period.company}</span>{period.note && <small>{period.note}</small>}</div>
+                    <div className="income-row__period"><span><CalendarClock size={14} />{formatIncomePeriod(period)}</span>{isCurrent && <small>Current</small>}</div>
+                    <div className="income-row__amount"><strong>{formatMoney(period.monthlyIncome)}</strong><small>per month</small></div>
+                    <button className="icon-button icon-button--small" onClick={() => onEdit(period)} aria-label={`Edit ${period.role} at ${period.company}`}><Pencil size={15} /></button>
+                  </div>
+                )
+              })}
+            </div>
+          </section>
+        </>
+      ) : (
+        <section className="card income-empty"><div><Building2 size={23} /></div><h3>Build your income timeline</h3><p>Add your current job first, then previous roles to reveal your salary progress graph.</p><button className="button button--primary" onClick={onAdd}><Plus size={16} /> Add current job</button></section>
+      )}
+    </>
+  )
+}
+
+function IncomeProgressChart({ periods, formatMoney }: { periods: IncomePeriod[]; formatMoney: (value: number, compact?: boolean) => string }) {
+  const chartWidth = 880
+  const chartHeight = 268
+  const chartLeft = 82
+  const chartRight = 25
+  const chartTop = 26
+  const chartBottom = 42
+  const maximum = Math.max(...periods.map((period) => period.monthlyIncome), 1) * 1.12
+  const monthNumbers = periods.map((period) => incomeMonthNumber(period.startMonth))
+  const firstMonth = Math.min(...monthNumbers)
+  const lastMonth = Math.max(...monthNumbers)
+  const monthRange = Math.max(lastMonth - firstMonth, 1)
+  const plotHeight = chartHeight - chartTop - chartBottom
+  const points = periods.map((period) => ({
+    ...period,
+    x: periods.length === 1 ? chartWidth / 2 : chartLeft + ((incomeMonthNumber(period.startMonth) - firstMonth) / monthRange) * (chartWidth - chartLeft - chartRight),
+    y: chartTop + ((maximum - period.monthlyIncome) / maximum) * plotHeight,
+  }))
+  const chartFloor = chartHeight - chartBottom
+  const areaPoints = points.length > 1 ? `${points[0].x},${chartFloor} ${points.map((point) => `${point.x},${point.y}`).join(' ')} ${points.at(-1)!.x},${chartFloor}` : ''
+  const labelEvery = Math.max(1, Math.ceil(points.length / 6))
+  const gridLevels = [0, .5, 1].map((position) => ({ position, y: chartTop + position * plotHeight, value: maximum * (1 - position) }))
+
+  return (
+    <section className="card income-progress-card">
+      <div className="income-progress-card__header">
+        <CardHeader eyebrow="Monthly salary in THB" title="Salary progression" />
+        <span className="income-progress-chip"><TrendingUp size={14} /> {periods.length} milestone{periods.length === 1 ? '' : 's'}</span>
+      </div>
+      <p className="section-intro">Each point marks the salary recorded when you started a role. Hover a point to see its company and title.</p>
+      <div className="income-chart" role="img" aria-label={periods.map((period) => `${formatIncomeMonth(period.startMonth)}, ${period.role} at ${period.company}, ${formatMoney(period.monthlyIncome)} per month`).join('; ')}>
+        <div className="income-chart__legend"><span><i /> Monthly income</span><small>Salary milestones by job start date</small></div>
+        <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} aria-hidden="true">
+          <defs><linearGradient id="income-area-gradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#628fa0" stopOpacity=".3" /><stop offset="100%" stopColor="#628fa0" stopOpacity=".025" /></linearGradient></defs>
+          {gridLevels.map((level) => <g key={level.position}><line x1={chartLeft} x2={chartWidth - chartRight} y1={level.y} y2={level.y} className="income-grid-line" /><text x={chartLeft - 11} y={level.y + 4} textAnchor="end" className="income-axis-label">{formatMoney(level.value, true)}</text></g>)}
+          {points.length > 1 && <polygon points={areaPoints} className="income-chart-area" />}
+          {points.length > 1 && <polyline points={points.map((point) => `${point.x},${point.y}`).join(' ')} className="income-chart-line" />}
+          {points.map((point, index) => <g key={point.id}><line x1={point.x} x2={point.x} y1={point.y + 8} y2={chartFloor} className="income-point-guide" />{points.length === 1 && <line x1={chartLeft} x2={point.x} y1={point.y} y2={point.y} className="income-single-line" />}<circle cx={point.x} cy={point.y} r={index === points.length - 1 ? 7 : 5} className={cx('income-chart-point', index === points.length - 1 && 'income-chart-point--latest')}><title>{point.role} at {point.company} · {formatMoney(point.monthlyIncome)} per month</title></circle>{(index % labelEvery === 0 || index === points.length - 1) && <text x={point.x} y={chartHeight - 10} textAnchor={index === 0 && points.length > 1 ? 'start' : index === points.length - 1 && points.length > 1 ? 'end' : 'middle'} className="income-month-label">{formatSnapshotMonth(point.startMonth)}</text>}</g>)}
+        </svg>
+      </div>
+    </section>
+  )
+}
+
+function incomeMonthNumber(month: string) {
+  const [year, monthNumber] = month.split('-').map(Number)
+  return year * 12 + monthNumber - 1
+}
+
+function formatIncomePeriod(period: IncomePeriod) {
+  const start = formatIncomeMonth(period.startMonth)
+  const end = period.endMonth ? formatIncomeMonth(period.endMonth) : 'Present'
+  return `${start} – ${end} · ${incomePeriodDuration(period.startMonth, period.endMonth)}`
+}
+
+function formatIncomeMonth(month: string) {
+  return new Date(`${month}-01T00:00:00`).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+}
+
+function incomePeriodDuration(startMonth: string, endMonth: string) {
+  const start = new Date(`${startMonth}-01T00:00:00`)
+  const end = new Date(`${endMonth || currentMonthKey()}-01T00:00:00`)
+  const months = Math.max(1, (end.getFullYear() - start.getFullYear()) * 12 + end.getMonth() - start.getMonth() + 1)
+  const years = Math.floor(months / 12)
+  const remainingMonths = months % 12
+  return [years > 0 ? `${years}y` : '', remainingMonths > 0 ? `${remainingMonths}m` : ''].filter(Boolean).join(' ')
 }
 
 function ToggleRow({ label, copy, checked, onChange, danger = false }: { label: string; copy: string; checked: boolean; onChange: (value: boolean) => void; danger?: boolean }) {
@@ -1898,6 +2067,54 @@ function currencySymbol(currency: string) {
 
 function currencyLocale(currency: string) {
   return currency === 'THB' ? 'th-TH' : 'en-US'
+}
+
+function IncomePeriodModal({ period, onClose, onSave, onDelete }: {
+  period: IncomePeriod | null
+  onClose: () => void
+  onSave: (period: IncomePeriod) => void
+  onDelete: (id: string) => void
+}) {
+  const [form, setForm] = useState<IncomePeriod>(period ?? {
+    id: crypto.randomUUID(),
+    company: '',
+    role: '',
+    monthlyIncome: 0,
+    startMonth: currentMonthKey(),
+    endMonth: '',
+    note: '',
+  })
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    if (!form.company.trim() || !form.role.trim() || form.monthlyIncome <= 0 || !form.startMonth || (form.endMonth && form.endMonth < form.startMonth)) return
+    onSave({ ...form, company: form.company.trim(), role: form.role.trim(), note: form.note.trim() })
+  }
+
+  return (
+    <div className="modal-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="income-period-modal-title">
+        <div className="modal__header"><div><span>Income journey</span><h2 id="income-period-modal-title">{period ? 'Edit job period' : 'Add job or income'}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
+        <form onSubmit={submit}>
+          <div className="two-fields">
+            <label className="field"><span>Company or income source</span><input autoFocus placeholder="e.g. Acme Thailand" value={form.company} onChange={(event) => setForm((current) => ({ ...current, company: event.target.value }))} required /></label>
+            <label className="field"><span>Role or job</span><input placeholder="e.g. Product designer" value={form.role} onChange={(event) => setForm((current) => ({ ...current, role: event.target.value }))} required /></label>
+          </div>
+          <label className="field"><span>Gross monthly income in THB</span><div className="money-input money-input--emphasis"><span>{currencySymbol(BASE_CURRENCY)}</span><input type="text" inputMode="numeric" pattern="[0-9,]*" placeholder="50,000" value={moneyInputValue(form.monthlyIncome)} onChange={(event) => setForm((current) => ({ ...current, monthlyIncome: moneyNumberFromText(event.target.value) }))} required /></div><small className="field-hint">Use your regular monthly amount before bonuses for a consistent comparison.</small></label>
+          <div className="two-fields">
+            <label className="field"><span>Start month</span><input type="month" value={form.startMonth} onChange={(event) => setForm((current) => ({ ...current, startMonth: event.target.value, endMonth: current.endMonth && current.endMonth < event.target.value ? '' : current.endMonth }))} required /></label>
+            <label className="field"><span>End month</span><input type="month" min={form.startMonth} value={form.endMonth} onChange={(event) => setForm((current) => ({ ...current, endMonth: event.target.value }))} /><small className="field-hint">Leave blank if this is your current job.</small></label>
+          </div>
+          <label className="field"><span>Optional note</span><input placeholder="e.g. Promotion, career change, or freelance contract" value={form.note} onChange={(event) => setForm((current) => ({ ...current, note: event.target.value }))} /></label>
+          <div className="modal-guidance"><ShieldCheck size={16} /><span>Income records are private and use the same local storage and Supabase sync as your portfolio.</span></div>
+          <div className="modal__actions">
+            {period && <button type="button" className="button button--danger" onClick={() => window.confirm(`Remove ${period.role} at ${period.company} from your income journey?`) && onDelete(period.id)}><Trash2 size={16} />Remove</button>}
+            <div className="modal__actions-right"><button type="button" className="button button--secondary" onClick={onClose}>Cancel</button><button type="submit" className="button button--primary">{period ? 'Save changes' : 'Add income period'}</button></div>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
 }
 
 function AccountModal({ configured, user, syncStatus, syncStatusLabel, syncError, email, message, busy, onEmailChange, onSubmit, onSignOut, onClose }: {

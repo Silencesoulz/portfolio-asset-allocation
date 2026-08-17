@@ -12,6 +12,7 @@ Steady is a private, browser-based net-worth and asset-allocation tracker for pe
 - Emergency reserve, savings rate, automatic contribution, debt, and long-term goal planning
 - THB-based values with live USD and AUD display conversion, privacy masking, and responsive mobile navigation
 - Automatic monthly net-worth snapshots with a twelve-month trend view
+- A dedicated income-progress page with a salary progression graph and company, role, and employment timeline
 - Optional Supabase magic-link accounts, secure cross-device sync, and Realtime updates
 - Clearly separated sample data and educational disclaimers
 
