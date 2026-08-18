@@ -980,7 +980,7 @@ function App() {
       <nav className="mobile-tabs" aria-label="Mobile navigation">
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon
-          return <button key={item.id} className={cx(page === item.id && 'active')} onClick={() => navigate(item.id)}><span className={cx('mobile-tab-icon', `mobile-tab-icon--${item.tone}`)}><Icon size={17} strokeWidth={2.2} /></span><span>{item.shortLabel}</span></button>
+          return <button key={item.id} className={cx(page === item.id && 'active')} aria-current={page === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span className={cx('mobile-tab-icon', `mobile-tab-icon--${item.tone}`)}><Icon size={20} strokeWidth={2.2} /></span><span>{item.shortLabel}</span></button>
         })}
       </nav>
 
@@ -1101,7 +1101,7 @@ function NetWorthPage({ items, history, portfolioTotal, formatMoney, onAdd, onEd
         eyebrow="Your complete picture"
         title="Net Worth"
         copy="See what you own, subtract what you owe, and follow the number that reflects your whole financial life."
-        actions={<button className="button button--primary" onClick={onAdd}><Plus size={17} /> Add asset or debt</button>}
+        actions={<button className="button button--primary" onClick={onAdd}><Plus size={17} /> Add asset</button>}
       />
 
       {items.some((item) => item.isSample) && (
@@ -1182,7 +1182,7 @@ function NetWorthPage({ items, history, portfolioTotal, formatMoney, onAdd, onEd
               </div>
             )
           })}
-          {portfolioTotal === 0 && items.length === 0 && <EmptyState icon={Scale} title="Nothing tracked yet" copy="Add your cash, property, vehicles, or debts to begin." action="Add asset or debt" onAction={onAdd} />}
+          {portfolioTotal === 0 && items.length === 0 && <EmptyState icon={Scale} title="Nothing tracked yet" copy="Add your first asset to begin." action="Add asset" onAction={onAdd} />}
         </div>
       </section>
 
@@ -1664,15 +1664,6 @@ function AssetPlanPage({ items, settings, formatMoney, updateSettings, onNavigat
       </div>
 
       {excludedAssets > 0 && <div className="excluded-note"><Building2 size={18} /><div><strong>{formatMoney(excludedAssets)} is excluded from the allocation calculation</strong><span>Property, vehicles, and other personal assets count toward net worth but may not be liquid or suitable for this investment mix.</span></div></div>}
-
-      <section className="education-note asset-plan-disclaimer">
-        <div><ShieldCheck size={20} /><strong>Understand the illustration</strong></div>
-        <p>Actual returns can be negative, and taxes, fees, inflation, product risk, and timing will change results. The suggested mix is a general educational framework based on the inputs you provide—not personalized investment advice.</p>
-        <div className="source-links">
-          <a href="https://www.investor.gov/introduction-investing/getting-started/asset-allocation" target="_blank" rel="noreferrer">Investor.gov: asset allocation <ArrowRight size={14} /></a>
-          <a href="https://www.investor.gov/financial-tools-calculators/calculators/compound-interest-calculator" target="_blank" rel="noreferrer">Investor.gov: compound interest <ArrowRight size={14} /></a>
-        </div>
-      </section>
     </>
   )
 }
@@ -1944,6 +1935,18 @@ function IncomePage({ periods, formatMoney, onAdd, onEdit }: {
   const latestIncome = currentIncome || ordered.at(-1)?.monthlyIncome || 0
   const firstIncome = ordered[0]?.monthlyIncome ?? 0
   const growth = firstIncome > 0 ? ((latestIncome - firstIncome) / firstIncome) * 100 : 0
+  const companiesTracked = new Set(ordered.map((period) => period.company.trim().toLocaleLowerCase())).size
+  const previousPeriodById = new Map(ordered.map((period, index) => [period.id, ordered[index - 1]]))
+  const companyGroups = [...ordered].reverse().reduce<Array<{ key: string; company: string; periods: IncomePeriod[] }>>((groups, period) => {
+    const companyKey = period.company.trim().toLocaleLowerCase()
+    const previousGroup = groups.at(-1)
+    if (previousGroup?.key === companyKey) {
+      previousGroup.periods.push(period)
+    } else {
+      groups.push({ key: companyKey, company: period.company, periods: [period] })
+    }
+    return groups
+  }, [])
 
   return (
     <>
@@ -1951,37 +1954,62 @@ function IncomePage({ periods, formatMoney, onAdd, onEdit }: {
         eyebrow="Career & earning history"
         title="Income Progress"
         copy="See how your monthly income has changed across companies and roles. All entries use gross monthly income in THB for a consistent comparison."
-        actions={<button className="button button--primary" onClick={onAdd}><Plus size={16} /> Add job or income</button>}
+        actions={<button className="button button--primary" onClick={onAdd}><Plus size={16} /> Add job</button>}
       />
       {ordered.length > 0 ? (
         <>
           <div className="income-summary">
             <div><span>{currentPeriods.length > 0 ? 'Current monthly income' : 'Latest monthly income'}</span><strong>{formatMoney(latestIncome)}</strong><small>{currentPeriods.length > 1 ? `${currentPeriods.length} current income sources` : currentPeriods.length === 1 ? 'Current role' : 'No current role marked'}</small></div>
             <div><span>Annualized income</span><strong>{formatMoney(latestIncome * 12)}</strong><small>Monthly income × 12, before bonuses</small></div>
-            <div><span>Growth from first record</span><strong className={cx(growth < 0 && 'negative')}>{growth >= 0 ? '+' : ''}{growth.toFixed(1)}%</strong><small>{ordered.length} job period{ordered.length === 1 ? '' : 's'} tracked</small></div>
+            <div><span>Growth from first record</span><strong className={cx(growth < 0 && 'negative')}>{growth >= 0 ? '+' : ''}{growth.toFixed(1)}%</strong><small>{companiesTracked} compan{companiesTracked === 1 ? 'y' : 'ies'} · {ordered.length} role milestone{ordered.length === 1 ? '' : 's'}</small></div>
           </div>
           <IncomeProgressChart periods={ordered} formatMoney={formatMoney} />
           <section className="card income-timeline-card">
             <CardHeader eyebrow="Companies & roles" title="Employment timeline" />
-            <p className="section-intro">Your work history from newest to oldest, with the salary recorded for each period.</p>
+            <p className="section-intro">Your work history from newest to oldest, grouped by company with the change from each previous salary.</p>
             <div className="income-timeline" aria-label="Employment and income history">
-              {[...ordered].reverse().map((period, index) => {
-                const isCurrent = !period.endMonth || period.endMonth >= currentMonth
+              {companyGroups.map((group, groupIndex) => {
+                const groupIsCurrent = group.periods.some((period) => !period.endMonth || period.endMonth >= currentMonth)
                 return (
-                  <div className="income-row" key={period.id}>
-                    <div className="income-row__track"><span className={cx(isCurrent && 'current')} />{index < ordered.length - 1 && <i />}</div>
-                    <div className="income-row__identity"><strong>{period.role}</strong><span>{period.company}</span>{period.note && <small>{period.note}</small>}</div>
-                    <div className="income-row__period"><span><CalendarClock size={14} />{formatIncomePeriod(period)}</span>{isCurrent && <small>Current</small>}</div>
-                    <div className="income-row__amount"><strong>{formatMoney(period.monthlyIncome)}</strong><small>per month</small></div>
-                    <button className="icon-button icon-button--small" onClick={() => onEdit(period)} aria-label={`Edit ${period.role} at ${period.company}`}><Pencil size={15} /></button>
-                  </div>
+                  <section className={cx('income-company-group', groupIsCurrent && 'income-company-group--current')} key={`${group.key}-${group.periods[0].id}`} aria-label={group.company}>
+                    <div className="income-company-group__track"><span className={cx(groupIsCurrent && 'current')} />{groupIndex < companyGroups.length - 1 && <i />}</div>
+                    <div className="income-company-group__identity">
+                      <span className="income-company-group__icon"><Building2 size={17} /></span>
+                      <div><strong>{group.company}</strong><small>{group.periods.length} role{group.periods.length === 1 ? '' : 's'} · {formatCompanyPeriod(group.periods)}</small></div>
+                    </div>
+                    <div className="income-company-group__roles">
+                      {group.periods.map((period) => {
+                        const isCurrent = !period.endMonth || period.endMonth >= currentMonth
+                        const previousPeriod = previousPeriodById.get(period.id)
+                        const salaryDelta = previousPeriod ? period.monthlyIncome - previousPeriod.monthlyIncome : null
+                        const salaryDeltaPercent = previousPeriod && previousPeriod.monthlyIncome > 0 ? (salaryDelta! / previousPeriod.monthlyIncome) * 100 : null
+                        return (
+                          <div className={cx('income-role-row', isCurrent && 'income-role-row--current')} key={period.id}>
+                            <div className="income-role-row__identity"><strong>{period.role}</strong>{period.note && <small>{period.note}</small>}</div>
+                            <div className="income-row__period"><span><CalendarClock size={14} />{formatIncomePeriod(period)}</span>{isCurrent && <small>Current</small>}</div>
+                            <div className="income-row__amount">
+                              <strong>{formatMoney(period.monthlyIncome)}</strong>
+                              <small>per month</small>
+                              {salaryDelta !== null && salaryDeltaPercent !== null && (
+                                <span className={cx('income-change', salaryDelta > 0 ? 'income-change--up' : salaryDelta < 0 ? 'income-change--down' : 'income-change--flat')} title="Change from the previous salary record">
+                                  {salaryDelta > 0 ? <ArrowUpRight size={12} /> : salaryDelta < 0 ? <ArrowDownRight size={12} /> : <CircleMinus size={12} />}
+                                  {salaryDelta > 0 ? '+' : salaryDelta < 0 ? '−' : ''}{formatMoney(Math.abs(salaryDelta))} · {salaryDeltaPercent > 0 ? '+' : ''}{salaryDeltaPercent.toFixed(1)}%
+                                </span>
+                              )}
+                            </div>
+                            <button className="icon-button income-edit-button" onClick={() => onEdit(period)} aria-label={`Edit ${period.role} at ${period.company}`}><Pencil size={16} /></button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </section>
                 )
               })}
             </div>
           </section>
         </>
       ) : (
-        <section className="card income-empty"><div><Building2 size={23} /></div><h3>Build your income timeline</h3><p>Add your current job first, then previous roles to reveal your salary progress graph.</p><button className="button button--primary" onClick={onAdd}><Plus size={16} /> Add current job</button></section>
+        <section className="card income-empty"><div><Building2 size={23} /></div><h3>Build your income timeline</h3><p>Add your current job to begin.</p><button className="button button--primary" onClick={onAdd}><Plus size={16} /> Add job</button></section>
       )}
     </>
   )
@@ -2042,6 +2070,13 @@ function formatIncomePeriod(period: IncomePeriod) {
   return `${start} – ${end} · ${incomePeriodDuration(period.startMonth, period.endMonth)}`
 }
 
+function formatCompanyPeriod(periods: IncomePeriod[]) {
+  const chronological = [...periods].sort((a, b) => a.startMonth.localeCompare(b.startMonth))
+  const first = chronological[0]
+  const latest = chronological.at(-1)!
+  return `${formatIncomeMonth(first.startMonth)} – ${latest.endMonth ? formatIncomeMonth(latest.endMonth) : 'Present'}`
+}
+
 function formatIncomeMonth(month: string) {
   return new Date(`${month}-01T00:00:00`).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
 }
@@ -2053,6 +2088,50 @@ function incomePeriodDuration(startMonth: string, endMonth: string) {
   const years = Math.floor(months / 12)
   const remainingMonths = months % 12
   return [years > 0 ? `${years}y` : '', remainingMonths > 0 ? `${remainingMonths}m` : ''].filter(Boolean).join(' ')
+}
+
+const MONTH_OPTIONS = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+]
+
+function MonthYearField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  const [year, month] = value.split('-')
+
+  return (
+    <div className="field month-year-field">
+      <span>{label}</span>
+      <div className="month-year-control">
+        <select aria-label={`${label} month`} value={month} onChange={(event) => onChange(`${year}-${event.target.value}`)}>
+          {MONTH_OPTIONS.map((name, index) => <option key={name} value={String(index + 1).padStart(2, '0')}>{name}</option>)}
+        </select>
+        <YearInput key={year} label={label} year={year} onChange={(nextYear) => onChange(`${nextYear}-${month}`)} />
+      </div>
+    </div>
+  )
+}
+
+function YearInput({ label, year, onChange }: { label: string; year: string; onChange: (year: string) => void }) {
+  const [input, setInput] = useState(year)
+
+  const update = (nextValue: string) => {
+    const digits = nextValue.replace(/\D/g, '').slice(0, 4)
+    setInput(digits)
+    const numericYear = Number(digits)
+    if (digits.length === 4 && numericYear >= 1900 && numericYear <= 2200) onChange(digits)
+  }
+
+  return <input aria-label={`${label} year`} type="text" inputMode="numeric" pattern="[0-9]{4}" maxLength={4} value={input} onChange={(event) => update(event.target.value)} onBlur={() => (input.length !== 4 || Number(input) < 1900 || Number(input) > 2200) && setInput(year)} />
 }
 
 function ToggleRow({ label, copy, checked, onChange, danger = false }: { label: string; copy: string; checked: boolean; onChange: (value: boolean) => void; danger?: boolean }) {
@@ -2094,22 +2173,25 @@ function IncomePeriodModal({ period, onClose, onSave, onDelete }: {
   return (
     <div className="modal-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div className="modal" role="dialog" aria-modal="true" aria-labelledby="income-period-modal-title">
-        <div className="modal__header"><div><span>Income journey</span><h2 id="income-period-modal-title">{period ? 'Edit job period' : 'Add job or income'}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
+        <div className="modal__header"><div><span>Employment</span><h2 id="income-period-modal-title">{period ? 'Edit job' : 'Add job'}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
         <form onSubmit={submit}>
           <div className="two-fields">
-            <label className="field"><span>Company or income source</span><input autoFocus placeholder="e.g. Acme Thailand" value={form.company} onChange={(event) => setForm((current) => ({ ...current, company: event.target.value }))} required /></label>
-            <label className="field"><span>Role or job</span><input placeholder="e.g. Product designer" value={form.role} onChange={(event) => setForm((current) => ({ ...current, role: event.target.value }))} required /></label>
+            <label className="field"><span>Company</span><input autoFocus value={form.company} onChange={(event) => setForm((current) => ({ ...current, company: event.target.value }))} required /></label>
+            <label className="field"><span>Role</span><input value={form.role} onChange={(event) => setForm((current) => ({ ...current, role: event.target.value }))} required /></label>
           </div>
-          <label className="field"><span>Gross monthly income in THB</span><div className="money-input money-input--emphasis"><span>{currencySymbol(BASE_CURRENCY)}</span><input type="text" inputMode="numeric" pattern="[0-9,]*" placeholder="50,000" value={moneyInputValue(form.monthlyIncome)} onChange={(event) => setForm((current) => ({ ...current, monthlyIncome: moneyNumberFromText(event.target.value) }))} required /></div><small className="field-hint">Use your regular monthly amount before bonuses for a consistent comparison.</small></label>
-          <div className="two-fields">
-            <label className="field"><span>Start month</span><input type="month" value={form.startMonth} onChange={(event) => setForm((current) => ({ ...current, startMonth: event.target.value, endMonth: current.endMonth && current.endMonth < event.target.value ? '' : current.endMonth }))} required /></label>
-            <label className="field"><span>End month</span><input type="month" min={form.startMonth} value={form.endMonth} onChange={(event) => setForm((current) => ({ ...current, endMonth: event.target.value }))} /><small className="field-hint">Leave blank if this is your current job.</small></label>
+          <label className="field"><span>Monthly income (THB)</span><div className="money-input money-input--emphasis"><span>{currencySymbol(BASE_CURRENCY)}</span><input type="text" inputMode="numeric" pattern="[0-9,]*" value={moneyInputValue(form.monthlyIncome)} onChange={(event) => setForm((current) => ({ ...current, monthlyIncome: moneyNumberFromText(event.target.value) }))} required /></div></label>
+          <label className="current-job-option">
+            <input type="checkbox" checked={!form.endMonth} onChange={(event) => setForm((current) => ({ ...current, endMonth: event.target.checked ? '' : current.startMonth > currentMonthKey() ? current.startMonth : currentMonthKey() }))} />
+            <span>Current job</span>
+          </label>
+          <div className={cx('two-fields', 'job-date-fields', !form.endMonth && 'job-date-fields--single')}>
+            <MonthYearField label="Start date" value={form.startMonth} onChange={(value) => setForm((current) => ({ ...current, startMonth: value, endMonth: current.endMonth && current.endMonth < value ? value : current.endMonth }))} />
+            {form.endMonth && <MonthYearField label="End date" value={form.endMonth} onChange={(value) => setForm((current) => ({ ...current, endMonth: value < current.startMonth ? current.startMonth : value }))} />}
           </div>
-          <label className="field"><span>Optional note</span><input placeholder="e.g. Promotion, career change, or freelance contract" value={form.note} onChange={(event) => setForm((current) => ({ ...current, note: event.target.value }))} /></label>
-          <div className="modal-guidance"><ShieldCheck size={16} /><span>Income records are private and use the same local storage and Supabase sync as your portfolio.</span></div>
+          <label className="field"><span>Note (optional)</span><input value={form.note} onChange={(event) => setForm((current) => ({ ...current, note: event.target.value }))} /></label>
           <div className="modal__actions">
             {period && <button type="button" className="button button--danger" onClick={() => window.confirm(`Remove ${period.role} at ${period.company} from your income journey?`) && onDelete(period.id)}><Trash2 size={16} />Remove</button>}
-            <div className="modal__actions-right"><button type="button" className="button button--secondary" onClick={onClose}>Cancel</button><button type="submit" className="button button--primary">{period ? 'Save changes' : 'Add income period'}</button></div>
+            <div className="modal__actions-right"><button type="button" className="button button--secondary" onClick={onClose}>Cancel</button><button type="submit" className="button button--primary">{period ? 'Save changes' : 'Add job'}</button></div>
           </div>
         </form>
       </div>
@@ -2201,19 +2283,18 @@ function NetWorthItemModal({ item, currency, onClose, onSave, onDelete }: {
   return (
     <div className="modal-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div className="modal" role="dialog" aria-modal="true" aria-labelledby="net-worth-modal-title">
-        <div className="modal__header"><div><span>{item ? 'Update balance' : 'Balance sheet'}</span><h2 id="net-worth-modal-title">{item ? 'Edit item' : 'Add asset or debt'}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
+        <div className="modal__header"><div><span>Balance sheet</span><h2 id="net-worth-modal-title">{item ? 'Edit item' : kind === 'asset' ? 'Add asset' : 'Add debt'}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
         <form onSubmit={submit}>
           <div className="kind-switch" aria-label="Item type">
             <button type="button" className={cx(kind === 'asset' && 'active')} onClick={() => changeKind('asset')}><BadgeCheck size={16} /> Asset</button>
             <button type="button" className={cx(kind === 'liability' && 'active', kind === 'liability' && 'liability')} onClick={() => changeKind('liability')}><CircleMinus size={16} /> Liability</button>
           </div>
           <div className="two-fields">
-            <label className="field"><span>Name</span><input autoFocus placeholder={kind === 'asset' ? 'e.g. Primary condo' : 'e.g. Condo mortgage'} value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} required /></label>
-            <label className="field"><span>Current value in {currency}</span><div className="money-input money-input--emphasis"><span>{currencySymbol(currency)}</span><input type="text" inputMode="numeric" pattern="[0-9,]*" placeholder="2,050,000" value={moneyInputValue(form.value)} onChange={(event) => setForm((current) => ({ ...current, value: moneyNumberFromText(event.target.value) }))} required /></div><small className="field-hint">This number is used in your net worth.</small></label>
+            <label className="field"><span>Name</span><input autoFocus value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} required /></label>
+            <label className="field"><span>Value ({currency})</span><div className="money-input money-input--emphasis"><span>{currencySymbol(currency)}</span><input type="text" inputMode="numeric" pattern="[0-9,]*" value={moneyInputValue(form.value)} onChange={(event) => setForm((current) => ({ ...current, value: moneyNumberFromText(event.target.value) }))} required /></div></label>
           </div>
           <label className="field"><span>Category</span><select value={form.category} onChange={(event) => setForm((current) => ({ ...current, category: event.target.value as NetWorthCategory }))}>{categories.map((category) => <option key={category}>{category}</option>)}</select></label>
-          <label className="field"><span>Optional note</span><input placeholder="e.g. Valued August 2026 — do not enter the amount here" value={form.note} onChange={(event) => setForm((current) => ({ ...current, note: event.target.value }))} /></label>
-          <div className="modal-guidance"><ShieldCheck size={16} /><span>Add each account or property once. Items in the same category are totalled automatically.</span></div>
+          <label className="field"><span>Note (optional)</span><input value={form.note} onChange={(event) => setForm((current) => ({ ...current, note: event.target.value }))} /></label>
           <div className="modal__actions">
             {item && <button type="button" className="button button--danger" onClick={() => window.confirm(`Remove ${item.name} from your net worth?`) && onDelete(item.id)}><Trash2 size={16} />Remove</button>}
             <div className="modal__actions-right"><button type="button" className="button button--secondary" onClick={onClose}>Cancel</button><button type="submit" className="button button--primary">{item ? 'Save changes' : `Add ${kind}`}</button></div>
