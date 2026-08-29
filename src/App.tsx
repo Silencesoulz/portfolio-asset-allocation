@@ -395,6 +395,38 @@ function App() {
   const lastRemoteUpdateRef = useRef<string | null>(null)
 
   useEffect(() => {
+    const viewport = window.visualViewport
+    if (!viewport) return
+    const root = document.documentElement
+    let frame = 0
+
+    const syncMobileViewport = () => {
+      window.cancelAnimationFrame(frame)
+      frame = window.requestAnimationFrame(() => {
+        const layoutHeight = Math.max(root.clientHeight, window.innerHeight)
+        const rawBottomGap = Math.max(0, layoutHeight - viewport.height - viewport.offsetTop)
+        const browserChromeGap = rawBottomGap <= 180 ? Math.round(rawBottomGap) : 0
+        root.style.setProperty('--mobile-viewport-bottom', `${browserChromeGap}px`)
+      })
+    }
+
+    syncMobileViewport()
+    viewport.addEventListener('resize', syncMobileViewport)
+    viewport.addEventListener('scroll', syncMobileViewport)
+    window.addEventListener('resize', syncMobileViewport)
+    window.addEventListener('orientationchange', syncMobileViewport)
+
+    return () => {
+      window.cancelAnimationFrame(frame)
+      viewport.removeEventListener('resize', syncMobileViewport)
+      viewport.removeEventListener('scroll', syncMobileViewport)
+      window.removeEventListener('resize', syncMobileViewport)
+      window.removeEventListener('orientationchange', syncMobileViewport)
+      root.style.removeProperty('--mobile-viewport-bottom')
+    }
+  }, [])
+
+  useEffect(() => {
     dataRef.current = dataWithCurrentSnapshot
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(dataWithCurrentSnapshot))
   }, [dataWithCurrentSnapshot])
@@ -1936,6 +1968,7 @@ function IncomePage({ periods, formatMoney, onAdd, onEdit }: {
   const firstIncome = ordered[0]?.monthlyIncome ?? 0
   const growth = firstIncome > 0 ? ((latestIncome - firstIncome) / firstIncome) * 100 : 0
   const companiesTracked = new Set(ordered.map((period) => period.company.trim().toLocaleLowerCase())).size
+  const rolesTracked = new Set(ordered.map((period) => `${period.company.trim().toLocaleLowerCase()}::${period.role.trim().toLocaleLowerCase()}`)).size
   const previousPeriodById = new Map(ordered.map((period, index) => [period.id, ordered[index - 1]]))
   const companyGroups = [...ordered].reverse().reduce<Array<{ key: string; company: string; periods: IncomePeriod[] }>>((groups, period) => {
     const companyKey = period.company.trim().toLocaleLowerCase()
@@ -1961,44 +1994,75 @@ function IncomePage({ periods, formatMoney, onAdd, onEdit }: {
           <div className="income-summary">
             <div><span>{currentPeriods.length > 0 ? 'Current monthly income' : 'Latest monthly income'}</span><strong>{formatMoney(latestIncome)}</strong><small>{currentPeriods.length > 1 ? `${currentPeriods.length} current income sources` : currentPeriods.length === 1 ? 'Current role' : 'No current role marked'}</small></div>
             <div><span>Annualized income</span><strong>{formatMoney(latestIncome * 12)}</strong><small>Monthly income × 12, before bonuses</small></div>
-            <div><span>Growth from first record</span><strong className={cx(growth < 0 && 'negative')}>{growth >= 0 ? '+' : ''}{growth.toFixed(1)}%</strong><small>{companiesTracked} compan{companiesTracked === 1 ? 'y' : 'ies'} · {ordered.length} role milestone{ordered.length === 1 ? '' : 's'}</small></div>
+            <div><span>Growth from first record</span><strong className={cx(growth < 0 && 'negative')}>{growth >= 0 ? '+' : ''}{growth.toFixed(1)}%</strong><small>{companiesTracked} compan{companiesTracked === 1 ? 'y' : 'ies'} · {rolesTracked} distinct role{rolesTracked === 1 ? '' : 's'}</small></div>
           </div>
           <IncomeProgressChart periods={ordered} formatMoney={formatMoney} />
           <section className="card income-timeline-card">
             <CardHeader eyebrow="Companies & roles" title="Employment timeline" />
             <p className="section-intro">Your work history from newest to oldest, grouped by company with the change from each previous salary.</p>
             <div className="income-timeline" aria-label="Employment and income history">
-              {companyGroups.map((group, groupIndex) => {
+              {companyGroups.map((group) => {
                 const groupIsCurrent = group.periods.some((period) => !period.endMonth || period.endMonth >= currentMonth)
+                const roleCount = new Set(group.periods.map((period) => period.role.trim().toLocaleLowerCase())).size
+                const roleGroups = group.periods.reduce<Array<{ key: string; role: string; periods: IncomePeriod[] }>>((groups, period) => {
+                  const roleKey = period.role.trim().toLocaleLowerCase()
+                  const previousGroup = groups.at(-1)
+                  if (previousGroup?.key === roleKey) {
+                    previousGroup.periods.push(period)
+                  } else {
+                    groups.push({ key: roleKey, role: period.role, periods: [period] })
+                  }
+                  return groups
+                }, [])
                 return (
-                  <section className={cx('income-company-group', groupIsCurrent && 'income-company-group--current')} key={`${group.key}-${group.periods[0].id}`} aria-label={group.company}>
-                    <div className="income-company-group__track"><span className={cx(groupIsCurrent && 'current')} />{groupIndex < companyGroups.length - 1 && <i />}</div>
-                    <div className="income-company-group__identity">
-                      <span className="income-company-group__icon"><Building2 size={17} /></span>
-                      <div><strong>{group.company}</strong><small>{group.periods.length} role{group.periods.length === 1 ? '' : 's'} · {formatCompanyPeriod(group.periods)}</small></div>
-                    </div>
-                    <div className="income-company-group__roles">
-                      {group.periods.map((period) => {
-                        const isCurrent = !period.endMonth || period.endMonth >= currentMonth
-                        const previousPeriod = previousPeriodById.get(period.id)
-                        const salaryDelta = previousPeriod ? period.monthlyIncome - previousPeriod.monthlyIncome : null
-                        const salaryDeltaPercent = previousPeriod && previousPeriod.monthlyIncome > 0 ? (salaryDelta! / previousPeriod.monthlyIncome) * 100 : null
+                  <section className={cx('income-company-card', groupIsCurrent && 'income-company-card--current')} key={`${group.key}-${group.periods[0].id}`} aria-label={group.company}>
+                    <header className="income-company-card__header">
+                      <div className="income-company-card__identity">
+                        <span className="income-company-card__icon"><Building2 size={19} /></span>
+                        <div><strong>{group.company}</strong><small>{formatCompanyPeriod(group.periods)}</small></div>
+                      </div>
+                      <div className="income-company-card__stats">
+                        <span>{roleCount} role{roleCount === 1 ? '' : 's'}</span>
+                        <span>{group.periods.length} salary record{group.periods.length === 1 ? '' : 's'}</span>
+                        {groupIsCurrent && <strong>Current company</strong>}
+                      </div>
+                    </header>
+                    <div className="income-company-card__body">
+                      {roleGroups.map((roleGroup) => {
+                        const roleIsCurrent = roleGroup.periods.some((period) => !period.endMonth || period.endMonth >= currentMonth)
                         return (
-                          <div className={cx('income-role-row', isCurrent && 'income-role-row--current')} key={period.id}>
-                            <div className="income-role-row__identity"><strong>{period.role}</strong>{period.note && <small>{period.note}</small>}</div>
-                            <div className="income-row__period"><span><CalendarClock size={14} />{formatIncomePeriod(period)}</span>{isCurrent && <small>Current</small>}</div>
-                            <div className="income-row__amount">
-                              <strong>{formatMoney(period.monthlyIncome)}</strong>
-                              <small>per month</small>
-                              {salaryDelta !== null && salaryDeltaPercent !== null && (
-                                <span className={cx('income-change', salaryDelta > 0 ? 'income-change--up' : salaryDelta < 0 ? 'income-change--down' : 'income-change--flat')} title="Change from the previous salary record">
-                                  {salaryDelta > 0 ? <ArrowUpRight size={12} /> : salaryDelta < 0 ? <ArrowDownRight size={12} /> : <CircleMinus size={12} />}
-                                  {salaryDelta > 0 ? '+' : salaryDelta < 0 ? '−' : ''}{formatMoney(Math.abs(salaryDelta))} · {salaryDeltaPercent > 0 ? '+' : ''}{salaryDeltaPercent.toFixed(1)}%
-                                </span>
-                              )}
+                          <section className={cx('income-role-group', roleIsCurrent && 'income-role-group--current')} key={`${roleGroup.key}-${roleGroup.periods[0].id}`}>
+                            <div className="income-role-group__identity">
+                              <span>Role</span>
+                              <strong>{roleGroup.role}</strong>
+                              <small>{roleGroup.periods.length} salary record{roleGroup.periods.length === 1 ? '' : 's'}</small>
+                              {roleIsCurrent && <em>Current role</em>}
                             </div>
-                            <button className="icon-button income-edit-button" onClick={() => onEdit(period)} aria-label={`Edit ${period.role} at ${period.company}`}><Pencil size={16} /></button>
-                          </div>
+                            <div className="income-salary-records">
+                              {roleGroup.periods.map((period) => {
+                                const isCurrent = !period.endMonth || period.endMonth >= currentMonth
+                                const previousPeriod = previousPeriodById.get(period.id)
+                                const salaryDelta = previousPeriod ? period.monthlyIncome - previousPeriod.monthlyIncome : null
+                                const salaryDeltaPercent = previousPeriod && previousPeriod.monthlyIncome > 0 ? (salaryDelta! / previousPeriod.monthlyIncome) * 100 : null
+                                return (
+                                  <div className={cx('income-salary-record', isCurrent && 'income-salary-record--current')} key={period.id}>
+                                    <div className="income-salary-record__details">
+                                      <span><CalendarClock size={14} />{formatIncomePeriod(period)}</span>
+                                      {period.note && <small>{period.note}</small>}
+                                    </div>
+                                    <div className="income-row__amount"><strong>{formatMoney(period.monthlyIncome)}</strong><small>per month</small></div>
+                                    {salaryDelta !== null && salaryDeltaPercent !== null ? (
+                                      <span className={cx('income-change', salaryDelta > 0 ? 'income-change--up' : salaryDelta < 0 ? 'income-change--down' : 'income-change--flat')} title="Change from the previous salary record">
+                                        {salaryDelta > 0 ? <ArrowUpRight size={12} /> : salaryDelta < 0 ? <ArrowDownRight size={12} /> : <CircleMinus size={12} />}
+                                        {salaryDelta > 0 ? '+' : salaryDelta < 0 ? '−' : ''}{formatMoney(Math.abs(salaryDelta))} · {salaryDeltaPercent > 0 ? '+' : ''}{salaryDeltaPercent.toFixed(1)}%
+                                      </span>
+                                    ) : <span className="income-change income-change--start">Starting point</span>}
+                                    <button className="icon-button income-edit-button" onClick={() => onEdit(period)} aria-label={`Edit ${period.role} at ${period.company}`}><Pencil size={16} /></button>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </section>
                         )
                       })}
                     </div>
@@ -2035,7 +2099,18 @@ function IncomeProgressChart({ periods, formatMoney }: { periods: IncomePeriod[]
   }))
   const chartFloor = chartHeight - chartBottom
   const areaPoints = points.length > 1 ? `${points[0].x},${chartFloor} ${points.map((point) => `${point.x},${point.y}`).join(' ')} ${points.at(-1)!.x},${chartFloor}` : ''
-  const labelEvery = Math.max(1, Math.ceil(points.length / 6))
+  const minimumLabelGap = 72
+  const labelIndices: number[] = []
+  points.slice(0, -1).forEach((point, index) => {
+    const previousLabelIndex = labelIndices.at(-1)
+    if (previousLabelIndex === undefined || point.x - points[previousLabelIndex].x >= minimumLabelGap) labelIndices.push(index)
+  })
+  if (points.length > 0) {
+    const latestIndex = points.length - 1
+    while (labelIndices.length > 0 && points[latestIndex].x - points[labelIndices.at(-1)!].x < minimumLabelGap) labelIndices.pop()
+    labelIndices.push(latestIndex)
+  }
+  const visibleLabelIndices = new Set(labelIndices)
   const gridLevels = [0, .5, 1].map((position) => ({ position, y: chartTop + position * plotHeight, value: maximum * (1 - position) }))
 
   return (
@@ -2044,7 +2119,7 @@ function IncomeProgressChart({ periods, formatMoney }: { periods: IncomePeriod[]
         <CardHeader eyebrow="Monthly salary in THB" title="Salary progression" />
         <span className="income-progress-chip"><TrendingUp size={14} /> {periods.length} milestone{periods.length === 1 ? '' : 's'}</span>
       </div>
-      <p className="section-intro">Each point marks the salary recorded when you started a role. Hover a point to see its company and title.</p>
+      <p className="section-intro">Each point marks the salary recorded when a role began.</p>
       <div className="income-chart" role="img" aria-label={periods.map((period) => `${formatIncomeMonth(period.startMonth)}, ${period.role} at ${period.company}, ${formatMoney(period.monthlyIncome)} per month`).join('; ')}>
         <div className="income-chart__legend"><span><i /> Monthly income</span><small>Salary milestones by job start date</small></div>
         <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} aria-hidden="true">
@@ -2052,7 +2127,7 @@ function IncomeProgressChart({ periods, formatMoney }: { periods: IncomePeriod[]
           {gridLevels.map((level) => <g key={level.position}><line x1={chartLeft} x2={chartWidth - chartRight} y1={level.y} y2={level.y} className="income-grid-line" /><text x={chartLeft - 11} y={level.y + 4} textAnchor="end" className="income-axis-label">{formatMoney(level.value, true)}</text></g>)}
           {points.length > 1 && <polygon points={areaPoints} className="income-chart-area" />}
           {points.length > 1 && <polyline points={points.map((point) => `${point.x},${point.y}`).join(' ')} className="income-chart-line" />}
-          {points.map((point, index) => <g key={point.id}><line x1={point.x} x2={point.x} y1={point.y + 8} y2={chartFloor} className="income-point-guide" />{points.length === 1 && <line x1={chartLeft} x2={point.x} y1={point.y} y2={point.y} className="income-single-line" />}<circle cx={point.x} cy={point.y} r={index === points.length - 1 ? 7 : 5} className={cx('income-chart-point', index === points.length - 1 && 'income-chart-point--latest')}><title>{point.role} at {point.company} · {formatMoney(point.monthlyIncome)} per month</title></circle>{(index % labelEvery === 0 || index === points.length - 1) && <text x={point.x} y={chartHeight - 10} textAnchor={index === 0 && points.length > 1 ? 'start' : index === points.length - 1 && points.length > 1 ? 'end' : 'middle'} className="income-month-label">{formatSnapshotMonth(point.startMonth)}</text>}</g>)}
+          {points.map((point, index) => <g key={point.id}><line x1={point.x} x2={point.x} y1={point.y + 8} y2={chartFloor} className="income-point-guide" />{points.length === 1 && <line x1={chartLeft} x2={point.x} y1={point.y} y2={point.y} className="income-single-line" />}<circle cx={point.x} cy={point.y} r={index === points.length - 1 ? 7 : 5} className={cx('income-chart-point', index === points.length - 1 && 'income-chart-point--latest')}><title>{point.role} at {point.company} · {formatMoney(point.monthlyIncome)} per month</title></circle>{visibleLabelIndices.has(index) && <text x={point.x} y={chartHeight - 10} textAnchor={point.x <= chartLeft + 36 ? 'start' : point.x >= chartWidth - chartRight - 36 ? 'end' : 'middle'} className="income-month-label">{formatSnapshotMonth(point.startMonth)}</text>}</g>)}
         </svg>
       </div>
     </section>
