@@ -393,38 +393,7 @@ function App() {
   const cloudReadyRef = useRef(false)
   const skipNextCloudSaveRef = useRef(false)
   const lastRemoteUpdateRef = useRef<string | null>(null)
-
-  useEffect(() => {
-    const viewport = window.visualViewport
-    if (!viewport) return
-    const root = document.documentElement
-    let frame = 0
-
-    const syncMobileViewport = () => {
-      window.cancelAnimationFrame(frame)
-      frame = window.requestAnimationFrame(() => {
-        const layoutHeight = Math.max(root.clientHeight, window.innerHeight)
-        const rawBottomGap = Math.max(0, layoutHeight - viewport.height - viewport.offsetTop)
-        const browserChromeGap = rawBottomGap <= 180 ? Math.round(rawBottomGap) : 0
-        root.style.setProperty('--mobile-viewport-bottom', `${browserChromeGap}px`)
-      })
-    }
-
-    syncMobileViewport()
-    viewport.addEventListener('resize', syncMobileViewport)
-    viewport.addEventListener('scroll', syncMobileViewport)
-    window.addEventListener('resize', syncMobileViewport)
-    window.addEventListener('orientationchange', syncMobileViewport)
-
-    return () => {
-      window.cancelAnimationFrame(frame)
-      viewport.removeEventListener('resize', syncMobileViewport)
-      viewport.removeEventListener('scroll', syncMobileViewport)
-      window.removeEventListener('resize', syncMobileViewport)
-      window.removeEventListener('orientationchange', syncMobileViewport)
-      root.style.removeProperty('--mobile-viewport-bottom')
-    }
-  }, [])
+  const mainContentRef = useRef<HTMLElement>(null)
 
   useEffect(() => {
     dataRef.current = dataWithCurrentSnapshot
@@ -753,7 +722,8 @@ function App() {
     setPage(destination)
     setMobileNavOpen(false)
     setNotificationsOpen(false)
-    window.scrollTo({ top: 0, behavior: 'smooth' })
+    mainContentRef.current?.scrollTo({ top: 0, behavior: 'auto' })
+    window.scrollTo({ top: 0, behavior: 'auto' })
   }
 
   const saveHolding = (holding: Holding) => {
@@ -941,7 +911,7 @@ function App() {
 
       {mobileNavOpen && <button className="nav-scrim" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
 
-      <main className="main-content">
+      <main className="main-content" ref={mainContentRef}>
         <header className="topbar">
           <button className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => setMobileNavOpen(true)}>
             <Menu size={20} />
@@ -2001,68 +1971,50 @@ function IncomePage({ periods, formatMoney, onAdd, onEdit }: {
             <CardHeader eyebrow="Companies & roles" title="Employment timeline" />
             <p className="section-intro">Your work history from newest to oldest, grouped by company with the change from each previous salary.</p>
             <div className="income-timeline" aria-label="Employment and income history">
-              {companyGroups.map((group) => {
+              {companyGroups.map((group, groupIndex) => {
                 const groupIsCurrent = group.periods.some((period) => !period.endMonth || period.endMonth >= currentMonth)
                 const roleCount = new Set(group.periods.map((period) => period.role.trim().toLocaleLowerCase())).size
-                const roleGroups = group.periods.reduce<Array<{ key: string; role: string; periods: IncomePeriod[] }>>((groups, period) => {
-                  const roleKey = period.role.trim().toLocaleLowerCase()
-                  const previousGroup = groups.at(-1)
-                  if (previousGroup?.key === roleKey) {
-                    previousGroup.periods.push(period)
-                  } else {
-                    groups.push({ key: roleKey, role: period.role, periods: [period] })
-                  }
-                  return groups
-                }, [])
                 return (
-                  <section className={cx('income-company-card', groupIsCurrent && 'income-company-card--current')} key={`${group.key}-${group.periods[0].id}`} aria-label={group.company}>
-                    <header className="income-company-card__header">
-                      <div className="income-company-card__identity">
-                        <span className="income-company-card__icon"><Building2 size={19} /></span>
-                        <div><strong>{group.company}</strong><small>{formatCompanyPeriod(group.periods)}</small></div>
+                  <section className={cx('income-company-group', groupIsCurrent && 'income-company-group--current')} key={`${group.key}-${group.periods[0].id}`} aria-label={group.company}>
+                    <div className="income-company-group__track" aria-hidden="true">
+                      <span className={cx(groupIsCurrent && 'current')} />
+                      {groupIndex < companyGroups.length - 1 && <i />}
+                    </div>
+                    <div className="income-company-group__identity">
+                      <span className="income-company-group__icon"><Building2 size={17} /></span>
+                      <div>
+                        <strong>{group.company}</strong>
+                        <small>{roleCount} role{roleCount === 1 ? '' : 's'} · {formatCompanyPeriod(group.periods)}</small>
                       </div>
-                      <div className="income-company-card__stats">
-                        <span>{roleCount} role{roleCount === 1 ? '' : 's'}</span>
-                        <span>{group.periods.length} salary record{group.periods.length === 1 ? '' : 's'}</span>
-                        {groupIsCurrent && <strong>Current company</strong>}
-                      </div>
-                    </header>
-                    <div className="income-company-card__body">
-                      {roleGroups.map((roleGroup) => {
-                        const roleIsCurrent = roleGroup.periods.some((period) => !period.endMonth || period.endMonth >= currentMonth)
+                    </div>
+                    <div className="income-company-group__roles">
+                      {group.periods.map((period) => {
+                        const isCurrent = !period.endMonth || period.endMonth >= currentMonth
+                        const previousPeriod = previousPeriodById.get(period.id)
+                        const salaryDelta = previousPeriod ? period.monthlyIncome - previousPeriod.monthlyIncome : null
+                        const salaryDeltaPercent = previousPeriod && previousPeriod.monthlyIncome > 0 ? (salaryDelta! / previousPeriod.monthlyIncome) * 100 : null
                         return (
-                          <section className={cx('income-role-group', roleIsCurrent && 'income-role-group--current')} key={`${roleGroup.key}-${roleGroup.periods[0].id}`}>
-                            <div className="income-role-group__identity">
-                              <span>Role</span>
-                              <strong>{roleGroup.role}</strong>
-                              <small>{roleGroup.periods.length} salary record{roleGroup.periods.length === 1 ? '' : 's'}</small>
-                              {roleIsCurrent && <em>Current role</em>}
+                          <div className={cx('income-role-row', isCurrent && 'income-role-row--current')} key={period.id}>
+                            <div className="income-role-row__identity">
+                              <strong>{period.role}</strong>
+                              {period.note && <small>{period.note}</small>}
                             </div>
-                            <div className="income-salary-records">
-                              {roleGroup.periods.map((period) => {
-                                const isCurrent = !period.endMonth || period.endMonth >= currentMonth
-                                const previousPeriod = previousPeriodById.get(period.id)
-                                const salaryDelta = previousPeriod ? period.monthlyIncome - previousPeriod.monthlyIncome : null
-                                const salaryDeltaPercent = previousPeriod && previousPeriod.monthlyIncome > 0 ? (salaryDelta! / previousPeriod.monthlyIncome) * 100 : null
-                                return (
-                                  <div className={cx('income-salary-record', isCurrent && 'income-salary-record--current')} key={period.id}>
-                                    <div className="income-salary-record__details">
-                                      <span><CalendarClock size={14} />{formatIncomePeriod(period)}</span>
-                                      {period.note && <small>{period.note}</small>}
-                                    </div>
-                                    <div className="income-row__amount"><strong>{formatMoney(period.monthlyIncome)}</strong><small>per month</small></div>
-                                    {salaryDelta !== null && salaryDeltaPercent !== null ? (
-                                      <span className={cx('income-change', salaryDelta > 0 ? 'income-change--up' : salaryDelta < 0 ? 'income-change--down' : 'income-change--flat')} title="Change from the previous salary record">
-                                        {salaryDelta > 0 ? <ArrowUpRight size={12} /> : salaryDelta < 0 ? <ArrowDownRight size={12} /> : <CircleMinus size={12} />}
-                                        {salaryDelta > 0 ? '+' : salaryDelta < 0 ? '−' : ''}{formatMoney(Math.abs(salaryDelta))} · {salaryDeltaPercent > 0 ? '+' : ''}{salaryDeltaPercent.toFixed(1)}%
-                                      </span>
-                                    ) : <span className="income-change income-change--start">Starting point</span>}
-                                    <button className="icon-button income-edit-button" onClick={() => onEdit(period)} aria-label={`Edit ${period.role} at ${period.company}`}><Pencil size={16} /></button>
-                                  </div>
-                                )
-                              })}
+                            <div className="income-row__period">
+                              <span><CalendarClock size={14} />{formatIncomePeriod(period)}</span>
+                              {isCurrent && <small>Current</small>}
                             </div>
-                          </section>
+                            <div className="income-row__amount">
+                              <strong>{formatMoney(period.monthlyIncome)}</strong>
+                              <small>per month</small>
+                              {salaryDelta !== null && salaryDeltaPercent !== null && (
+                                <span className={cx('income-change', salaryDelta > 0 ? 'income-change--up' : salaryDelta < 0 ? 'income-change--down' : 'income-change--flat')} title="Change from the previous salary record">
+                                  {salaryDelta > 0 ? <ArrowUpRight size={12} /> : salaryDelta < 0 ? <ArrowDownRight size={12} /> : <CircleMinus size={12} />}
+                                  {salaryDelta > 0 ? '+' : salaryDelta < 0 ? '−' : ''}{formatMoney(Math.abs(salaryDelta))} · {salaryDeltaPercent > 0 ? '+' : ''}{salaryDeltaPercent.toFixed(1)}%
+                                </span>
+                              )}
+                            </div>
+                            <button className="icon-button income-edit-button" onClick={() => onEdit(period)} aria-label={`Edit ${period.role} at ${period.company}`}><Pencil size={16} /></button>
+                          </div>
                         )
                       })}
                     </div>
