@@ -45,7 +45,7 @@ import { isSupabaseConfigured, supabase } from './lib/supabase'
 
 type Page = 'networth' | 'income' | 'overview' | 'allocation' | 'holdings' | 'plan'
 type AssetClass = 'US equity' | 'International equity' | 'Fixed income' | 'Cash' | 'Real assets'
-type NetWorthCategory = 'Cash' | 'Stocks / funds' | 'Bonds / deposits' | 'Property' | 'Vehicle' | 'Other asset' | 'Mortgage' | 'Loan' | 'Credit card' | 'Other liability'
+type NetWorthCategory = 'Cash & savings' | 'Fixed deposits' | 'Bonds / fixed income' | 'Stocks / equity funds' | 'Gold / diversifiers' | 'Property' | 'Vehicle' | 'Other asset' | 'Mortgage' | 'Loan' | 'Credit card' | 'Other liability'
 type CurrencyCode = 'THB' | 'USD' | 'AUD'
 
 type Holding = {
@@ -102,6 +102,7 @@ type AppSettings = {
   cashReturnRate: number
   incomeReturnRate: number
   growthReturnRate: number
+  diversifierReturnRate: number
   lastNetWorthUpdated: string
 }
 
@@ -146,9 +147,11 @@ const CLASS_META: Record<AssetClass, { color: string; soft: string; short: strin
 
 const NET_WORTH_META: Record<NetWorthCategory | 'Investment portfolio', { color: string; soft: string }> = {
   'Investment portfolio': { color: '#173f35', soft: '#dce9e3' },
-  Cash: { color: '#77a991', soft: '#e5efe9' },
-  'Stocks / funds': { color: '#173f35', soft: '#dce9e3' },
-  'Bonds / deposits': { color: '#7896a0', soft: '#e5edef' },
+  'Cash & savings': { color: '#77a991', soft: '#e5efe9' },
+  'Fixed deposits': { color: '#8ba3a9', soft: '#e8eef0' },
+  'Bonds / fixed income': { color: '#7896a0', soft: '#e5edef' },
+  'Stocks / equity funds': { color: '#173f35', soft: '#dce9e3' },
+  'Gold / diversifiers': { color: '#c59243', soft: '#f4ead7' },
   Property: { color: '#d5a85d', soft: '#f3e8d4' },
   Vehicle: { color: '#8498a2', soft: '#e8edef' },
   'Other asset': { color: '#c87756', soft: '#f1dfd7' },
@@ -158,7 +161,7 @@ const NET_WORTH_META: Record<NetWorthCategory | 'Investment portfolio', { color:
   'Other liability': { color: '#776a65', soft: '#ebe7e5' },
 }
 
-const ASSET_CATEGORIES: NetWorthCategory[] = ['Cash', 'Stocks / funds', 'Bonds / deposits', 'Property', 'Vehicle', 'Other asset']
+const ASSET_CATEGORIES: NetWorthCategory[] = ['Cash & savings', 'Fixed deposits', 'Bonds / fixed income', 'Stocks / equity funds', 'Gold / diversifiers', 'Property', 'Vehicle', 'Other asset']
 const LIABILITY_CATEGORIES: NetWorthCategory[] = ['Mortgage', 'Loan', 'Credit card', 'Other liability']
 
 const NAV_ITEMS: Array<{ id: Page; label: string; shortLabel: string; icon: LucideIcon; tone: 'gold' | 'mint' | 'coral' | 'blue' }> = [
@@ -198,12 +201,12 @@ function makeInitialData(): AppData {
   const reviewed = new Date()
   reviewed.setDate(reviewed.getDate() - 60)
   return {
-    dataVersion: 5,
+    dataVersion: 6,
     holdings: [],
     netWorthItems: [
-      { id: 'sample-cash', name: 'Cash and savings', category: 'Cash', value: 32000, note: 'Bank accounts', isSample: true },
-      { id: 'sample-stocks', name: 'Stocks and funds', category: 'Stocks / funds', value: 78000, note: 'Total across investment accounts', isSample: true },
-      { id: 'sample-bonds', name: 'Deposits and bonds', category: 'Bonds / deposits', value: 30000, note: 'Fixed income total', isSample: true },
+      { id: 'sample-cash', name: 'Cash and savings', category: 'Cash & savings', value: 32000, note: 'Bank accounts', isSample: true },
+      { id: 'sample-stocks', name: 'Stocks and funds', category: 'Stocks / equity funds', value: 78000, note: 'Total across investment accounts', isSample: true },
+      { id: 'sample-bonds', name: 'Bond fund', category: 'Bonds / fixed income', value: 30000, note: 'Diversified fixed income', isSample: true },
       { id: 'sample-condo', name: 'Primary condo', category: 'Property', value: 285000, note: 'Estimated current value', isSample: true },
       { id: 'sample-mortgage', name: 'Condo mortgage', category: 'Mortgage', value: 178000, note: 'Current loan balance', isSample: true },
     ],
@@ -231,6 +234,7 @@ function makeInitialData(): AppData {
       cashReturnRate: 2,
       incomeReturnRate: 4,
       growthReturnRate: 7,
+      diversifierReturnRate: 5,
       lastNetWorthUpdated: reviewed.toISOString(),
     },
     netWorthHistory: [],
@@ -247,9 +251,9 @@ function normalizeAppData(value: unknown): AppData | null {
     if (!parsed.dataVersion || parsed.dataVersion < 2) {
       const legacyHoldings = parsed.holdings ?? []
       const legacyGroups = [
-        { id: 'migrated-stocks', name: 'Stocks and funds', category: 'Stocks / funds' as NetWorthCategory, value: legacyHoldings.filter((holding) => ['US equity', 'International equity', 'Real assets'].includes(holding.assetClass)).reduce((sum, holding) => sum + holding.value, 0), note: 'Migrated from Holdings' },
-        { id: 'migrated-income', name: 'Bonds and deposits', category: 'Bonds / deposits' as NetWorthCategory, value: legacyHoldings.filter((holding) => holding.assetClass === 'Fixed income').reduce((sum, holding) => sum + holding.value, 0), note: 'Migrated from Holdings' },
-        { id: 'migrated-cash', name: 'Portfolio cash', category: 'Cash' as NetWorthCategory, value: legacyHoldings.filter((holding) => holding.assetClass === 'Cash').reduce((sum, holding) => sum + holding.value, 0), note: 'Migrated from Holdings' },
+        { id: 'migrated-stocks', name: 'Stocks and funds', category: 'Stocks / equity funds' as NetWorthCategory, value: legacyHoldings.filter((holding) => ['US equity', 'International equity', 'Real assets'].includes(holding.assetClass)).reduce((sum, holding) => sum + holding.value, 0), note: 'Migrated from Holdings' },
+        { id: 'migrated-income', name: 'Bonds and deposits', category: 'Bonds / fixed income' as NetWorthCategory, value: legacyHoldings.filter((holding) => holding.assetClass === 'Fixed income').reduce((sum, holding) => sum + holding.value, 0), note: 'Migrated from Holdings' },
+        { id: 'migrated-cash', name: 'Portfolio cash', category: 'Cash & savings' as NetWorthCategory, value: legacyHoldings.filter((holding) => holding.assetClass === 'Cash').reduce((sum, holding) => sum + holding.value, 0), note: 'Migrated from Holdings' },
       ].filter((item) => item.value > 0)
       parsed.netWorthItems = [...parsed.netWorthItems, ...legacyGroups.map((item) => ({ ...item, isSample: legacyHoldings.length > 0 && legacyHoldings.every((holding) => holding.isSample) }))]
       parsed.holdings = []
@@ -269,10 +273,25 @@ function normalizeAppData(value: unknown): AppData | null {
       parsed.incomePeriods = []
       parsed.dataVersion = 5
     }
+    if (parsed.dataVersion < 6) {
+      parsed.netWorthItems = parsed.netWorthItems.map((item) => {
+        const legacyCategory = item.category as string
+        if (legacyCategory === 'Cash') return { ...item, category: 'Cash & savings' }
+        if (legacyCategory === 'Stocks / funds') return { ...item, category: 'Stocks / equity funds' }
+        if (legacyCategory === 'Bonds / deposits') {
+          const itemDescription = `${item.name} ${item.note}`.toLocaleLowerCase()
+          const category: NetWorthCategory = /deposit|fixed|term|fcd/.test(itemDescription) ? 'Fixed deposits' : 'Bonds / fixed income'
+          return { ...item, category }
+        }
+        return item
+      })
+      parsed.dataVersion = 6
+    }
     if (!Array.isArray(parsed.incomePeriods)) parsed.incomePeriods = []
     parsed.settings.cashReturnRate ??= 2
     parsed.settings.incomeReturnRate ??= 4
     parsed.settings.growthReturnRate ??= 7
+    parsed.settings.diversifierReturnRate ??= 5
     parsed.settings.lastNetWorthUpdated ??= parsed.settings.lastReviewed ?? new Date().toISOString()
     if (!CURRENCIES.some((currency) => currency.code === parsed.settings.currency)) {
       parsed.settings.currency = BASE_CURRENCY
@@ -621,7 +640,7 @@ function App() {
   const netWorthTotals = useMemo(() => {
     const assets = data.netWorthItems.filter((item) => !isLiabilityCategory(item.category)).reduce((sum, item) => sum + item.value, 0)
     const liabilities = data.netWorthItems.filter((item) => isLiabilityCategory(item.category)).reduce((sum, item) => sum + item.value, 0)
-    const cash = data.netWorthItems.filter((item) => item.category === 'Cash').reduce((sum, item) => sum + item.value, 0)
+    const cash = data.netWorthItems.filter((item) => item.category === 'Cash & savings').reduce((sum, item) => sum + item.value, 0)
     return { assets, liabilities, cash, netWorth: assets - liabilities }
   }, [data.netWorthItems])
 
@@ -1082,7 +1101,7 @@ function NetWorthPage({ items, history, portfolioTotal, formatMoney, onAdd, onEd
   const totalLiabilities = liabilities.reduce((sum, item) => sum + item.value, 0)
   const netWorth = totalAssets - totalLiabilities
   const debtRatio = totalAssets > 0 ? (totalLiabilities / totalAssets) * 100 : 0
-  const investableAssets = assets.filter((item) => ['Cash', 'Stocks / funds', 'Bonds / deposits'].includes(item.category)).reduce((sum, item) => sum + item.value, 0)
+  const investableAssets = assets.filter((item) => ['Cash & savings', 'Fixed deposits', 'Bonds / fixed income', 'Stocks / equity funds', 'Gold / diversifiers'].includes(item.category)).reduce((sum, item) => sum + item.value, 0)
 
   const breakdown = [
     { label: 'Investment portfolio', value: portfolioTotal, color: NET_WORTH_META['Investment portfolio'].color },
@@ -1118,7 +1137,7 @@ function NetWorthPage({ items, history, portfolioTotal, formatMoney, onAdd, onEd
         <MetricCard label="Total net worth" value={formatMoney(netWorth)} helper="Everything you own minus everything you owe" icon={Scale} tone="green" />
         <MetricCard label="Total assets" value={formatMoney(totalAssets)} helper={`${assets.length + (portfolioTotal > 0 ? 1 : 0)} asset group${assets.length + (portfolioTotal > 0 ? 1 : 0) === 1 ? '' : 's'} tracked`} icon={BadgeCheck} tone="sand" />
         <MetricCard label="Total liabilities" value={formatMoney(totalLiabilities)} helper={totalLiabilities > 0 ? `${debtRatio.toFixed(1)}% of total assets` : 'No liabilities recorded'} icon={CircleMinus} tone={totalLiabilities > 0 ? 'coral' : 'green'} />
-        <MetricCard label="Investable assets" value={formatMoney(investableAssets)} helper="Cash, stocks, funds, bonds, and deposits" icon={TrendingUp} tone="blue" />
+        <MetricCard label="Investable assets" value={formatMoney(investableAssets)} helper="Reserve, stability, growth, and diversifiers" icon={TrendingUp} tone="blue" />
       </section>
 
       <NetWorthHistoryCard history={history} formatMoney={formatMoney} />
@@ -1276,9 +1295,10 @@ function nextSnapshotMonth(month: string) {
 }
 
 function CategoryIcon({ category, size = 18 }: { category: NetWorthCategory; size?: number }) {
-  if (category === 'Cash') return <Banknote size={size} />
-  if (category === 'Stocks / funds') return <TrendingUp size={size} />
-  if (category === 'Bonds / deposits') return <Landmark size={size} />
+  if (category === 'Cash & savings') return <Banknote size={size} />
+  if (category === 'Stocks / equity funds') return <TrendingUp size={size} />
+  if (category === 'Fixed deposits' || category === 'Bonds / fixed income') return <Landmark size={size} />
+  if (category === 'Gold / diversifiers') return <Sparkles size={size} />
   if (category === 'Property') return <Building2 size={size} />
   if (isLiabilityCategory(category)) return <CircleMinus size={size} />
   return <CircleDollarSign size={size} />
@@ -1552,18 +1572,19 @@ function getContributionPlan(allocations: AllocationRow[], total: number, contri
   return gaps.sort((a, b) => b.dollarGap - a.dollarGap).map((item) => ({ ...item, amount: Math.round((item.dollarGap / totalGap) * contribution) }))
 }
 
-type PlanBucket = 'Cash reserve' | 'Income assets' | 'Growth assets'
+type PlanBucket = 'Available cash' | 'Stability assets' | 'Long-term growth' | 'Diversifiers'
 
 const PLAN_META: Record<PlanBucket, { color: string; soft: string; description: string }> = {
-  'Cash reserve': { color: '#77a991', soft: '#e5efe9', description: 'Cash and accessible savings' },
-  'Income assets': { color: '#7896a0', soft: '#e5edef', description: 'Deposits and diversified bonds' },
-  'Growth assets': { color: '#173f35', soft: '#dce9e3', description: 'Diversified stocks and funds' },
+  'Available cash': { color: '#77a991', soft: '#e5efe9', description: 'Cash above your safety-reserve target' },
+  'Stability assets': { color: '#7896a0', soft: '#e5edef', description: 'Fixed deposits and high-quality bonds' },
+  'Long-term growth': { color: '#173f35', soft: '#dce9e3', description: 'Diversified stocks and equity funds' },
+  Diversifiers: { color: '#c59243', soft: '#f4ead7', description: 'Gold and other portfolio diversifiers' },
 }
 
-const PROFILE_MIX: Record<AppSettings['riskProfile'], { cash: number; income: number; growth: number; description: string }> = {
-  Conservative: { cash: 30, income: 45, growth: 25, description: 'Prioritizes stability and access to money.' },
-  Balanced: { cash: 15, income: 35, growth: 50, description: 'Balances stability with long-term growth.' },
-  Growth: { cash: 10, income: 20, growth: 70, description: 'Accepts more volatility for higher potential growth.' },
+const PROFILE_MIX: Record<AppSettings['riskProfile'], { stability: number; growth: number; diversifiers: number; description: string }> = {
+  Conservative: { stability: 65, growth: 30, diversifiers: 5, description: 'Prioritizes stability after the safety reserve is funded.' },
+  Balanced: { stability: 40, growth: 50, diversifiers: 10, description: 'Balances stability, diversification, and long-term growth.' },
+  Growth: { stability: 20, growth: 70, diversifiers: 10, description: 'Accepts more volatility for higher potential growth.' },
 }
 
 function AssetPlanPage({ items, settings, formatMoney, updateSettings, onNavigate }: {
@@ -1573,36 +1594,40 @@ function AssetPlanPage({ items, settings, formatMoney, updateSettings, onNavigat
   updateSettings: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void
   onNavigate: (page: Page) => void
 }) {
-  const cash = items.filter((item) => item.category === 'Cash').reduce((sum, item) => sum + item.value, 0)
-  const income = items.filter((item) => item.category === 'Bonds / deposits').reduce((sum, item) => sum + item.value, 0)
-  const growth = items.filter((item) => item.category === 'Stocks / funds').reduce((sum, item) => sum + item.value, 0)
-  const investable = cash + income + growth
-  const excludedAssets = items.filter((item) => ASSET_CATEGORIES.includes(item.category) && !['Cash', 'Stocks / funds', 'Bonds / deposits'].includes(item.category)).reduce((sum, item) => sum + item.value, 0)
+  const cash = items.filter((item) => item.category === 'Cash & savings').reduce((sum, item) => sum + item.value, 0)
+  const fixedDeposits = items.filter((item) => item.category === 'Fixed deposits').reduce((sum, item) => sum + item.value, 0)
+  const bonds = items.filter((item) => item.category === 'Bonds / fixed income').reduce((sum, item) => sum + item.value, 0)
+  const stability = fixedDeposits + bonds
+  const growth = items.filter((item) => item.category === 'Stocks / equity funds').reduce((sum, item) => sum + item.value, 0)
+  const diversifiers = items.filter((item) => item.category === 'Gold / diversifiers').reduce((sum, item) => sum + item.value, 0)
+  const excludedAssets = items.filter((item) => ['Property', 'Vehicle', 'Other asset'].includes(item.category)).reduce((sum, item) => sum + item.value, 0)
   const highInterestDebt = settings.hasHighInterestDebt || items.some((item) => item.category === 'Credit card' && item.value > 0)
   const profile = PROFILE_MIX[settings.riskProfile]
   const reserveNeed = Math.max(0, settings.monthlyEssentials * settings.emergencyTargetMonths)
-  const cashTarget = investable > 0 ? Math.min(investable, Math.max((profile.cash / 100) * investable, reserveNeed)) : 0
-  const remaining = Math.max(0, investable - cashTarget)
-  const riskWeightTotal = profile.income + profile.growth
-  const incomeTarget = riskWeightTotal > 0 ? remaining * (profile.income / riskWeightTotal) : 0
-  const growthTarget = riskWeightTotal > 0 ? remaining * (profile.growth / riskWeightTotal) : 0
+  const reserveGap = Math.max(0, reserveNeed - cash)
+  const cashAboveReserve = Math.max(0, cash - reserveNeed)
+  const investable = cashAboveReserve + stability + growth + diversifiers
+  const stabilityTarget = investable * (profile.stability / 100)
+  const growthTarget = investable * (profile.growth / 100)
+  const diversifierTarget = investable * (profile.diversifiers / 100)
   const targets: Array<{ bucket: PlanBucket; current: number; target: number; rate: number }> = [
-    { bucket: 'Cash reserve', current: cash, target: cashTarget, rate: settings.cashReturnRate },
-    { bucket: 'Income assets', current: income, target: incomeTarget, rate: settings.incomeReturnRate },
-    { bucket: 'Growth assets', current: growth, target: growthTarget, rate: settings.growthReturnRate },
+    ...(cashAboveReserve > 0 ? [{ bucket: 'Available cash' as const, current: cashAboveReserve, target: 0, rate: settings.cashReturnRate }] : []),
+    { bucket: 'Stability assets', current: stability, target: stabilityTarget, rate: settings.incomeReturnRate },
+    { bucket: 'Long-term growth', current: growth, target: growthTarget, rate: settings.growthReturnRate },
+    { bucket: 'Diversifiers', current: diversifiers, target: diversifierTarget, rate: settings.diversifierReturnRate },
   ]
-  const currentAnnualGrowth = cash * settings.cashReturnRate / 100 + income * settings.incomeReturnRate / 100 + growth * settings.growthReturnRate / 100
   const targetAnnualGrowth = targets.reduce((sum, item) => sum + item.target * item.rate / 100, 0)
   const targetRate = investable > 0 ? (targetAnnualGrowth / investable) * 100 : 0
   const projected5 = futureValue(investable, targetRate, 5, settings.monthlyContribution)
   const projected10 = futureValue(investable, targetRate, 10, settings.monthlyContribution)
+  const reserveProgress = reserveNeed > 0 ? Math.min(100, (cash / reserveNeed) * 100) : 100
 
   return (
     <>
       <PageHeading
         eyebrow="Illustrative organization"
         title="Investment Plan"
-        copy="Use your asset totals to compare your current mix with a simple cash, income, and growth framework."
+        copy="Protect near-term cash first, then organize the remaining portfolio by stability, long-term growth, and diversification."
         actions={<span className="assumption-chip"><Sparkles size={14} /> Uses editable assumptions</span>}
       />
 
@@ -1611,22 +1636,41 @@ function AssetPlanPage({ items, settings, formatMoney, updateSettings, onNavigat
       )}
 
       <section className="metric-grid" aria-label="Investment Plan summary">
-        <MetricCard label="Investable assets" value={formatMoney(investable)} helper="Cash, deposits, bonds, stocks, and funds" icon={CircleDollarSign} tone="green" />
+        <MetricCard label="Safety reserve" value={formatMoney(cash)} helper={`${formatMoney(reserveNeed)} target · ${settings.emergencyTargetMonths} months`} icon={ShieldCheck} tone="green" />
+        <MetricCard label="Investable portfolio" value={formatMoney(investable)} helper="Excludes the safety-reserve target" icon={CircleDollarSign} tone="blue" />
         <MetricCard label="Illustrative annual rate" value={`${targetRate.toFixed(1)}%`} helper="Weighted from your editable assumptions" icon={TrendingUp} tone="sand" />
-        <MetricCard label="Estimated first-year growth" value={formatMoney(targetAnnualGrowth)} helper={`Current mix estimate: ${formatMoney(currentAnnualGrowth)}`} icon={BarChart3} tone="blue" />
         <MetricCard label="10-year illustration" value={formatMoney(projected10)} helper={`Includes ${formatMoney(settings.monthlyContribution)} monthly`} icon={CalendarClock} tone="coral" />
       </section>
 
       <div className="asset-plan-grid">
         <section className="card suggested-mix-card">
-          <CardHeader eyebrow={`${settings.riskProfile} framework`} title="Current vs. suggested mix" />
-          <p className="section-intro">The cash target is increased when necessary to cover your {settings.emergencyTargetMonths}-month emergency-reserve goal.</p>
+          <CardHeader eyebrow="Step 1 · Protect" title="Safety reserve" />
+          <div className="reserve-plan">
+            <div className="reserve-plan__top">
+              <div><span>Accessible cash</span><strong>{formatMoney(cash)}</strong></div>
+              <div><span>{settings.emergencyTargetMonths}-month target</span><strong>{formatMoney(reserveNeed)}</strong></div>
+            </div>
+            <div className="reserve-plan__track" role="progressbar" aria-label="Safety reserve progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(reserveProgress)}><span style={{ width: `${reserveProgress}%` }} /></div>
+            <div className={cx('reserve-plan__status', reserveGap > 0 ? 'reserve-plan__status--gap' : 'reserve-plan__status--ready')}>
+              {reserveGap > 0 ? <ArrowUpRight size={14} /> : <Check size={14} />}
+              {reserveGap > 0 ? `Fund ${formatMoney(reserveGap)} more` : cashAboveReserve > 0 ? `${formatMoney(cashAboveReserve)} above the reserve target` : 'Reserve target covered'}
+            </div>
+            <p>Count only accessible cash that matches your emergency spending. Fixed deposits and bond funds belong under Stability assets.</p>
+          </div>
+
+          <div className="plan-mix-heading">
+            <div><span>Step 2 · Invest</span><h3>Current vs. suggested mix</h3></div>
+            <strong>{settings.riskProfile}</strong>
+          </div>
           {investable > 0 ? (
-            <div className="plan-allocation-list">
-              {targets.map((item) => {
+            <>
+              <div className="plan-allocation-list">
+                {targets.map((item) => {
                 const currentPercent = (item.current / investable) * 100
                 const targetPercent = (item.target / investable) * 100
                 const difference = item.target - item.current
+                const closeToTarget = Math.abs(difference) < investable * .005
+                const isAvailableCash = item.bucket === 'Available cash'
                 return (
                   <div className="plan-allocation-row" key={item.bucket}>
                     <div className="plan-allocation-row__title"><span className="plan-swatch" style={{ background: PLAN_META[item.bucket].color }} /><div><strong>{item.bucket}</strong><span>{PLAN_META[item.bucket].description}</span></div><strong>{formatMoney(item.target)}</strong></div>
@@ -1634,15 +1678,17 @@ function AssetPlanPage({ items, settings, formatMoney, updateSettings, onNavigat
                       <div><span>Current</span><i><b style={{ width: `${Math.min(currentPercent, 100)}%`, background: '#c7cfca' }} /></i><strong>{currentPercent.toFixed(1)}%</strong></div>
                       <div><span>Suggested</span><i><b style={{ width: `${Math.min(targetPercent, 100)}%`, background: PLAN_META[item.bucket].color }} /></i><strong>{targetPercent.toFixed(1)}%</strong></div>
                     </div>
-                    <div className={cx('plan-adjustment', Math.abs(difference) < investable * .005 && 'plan-adjustment--steady', difference < 0 && 'plan-adjustment--reduce')}>
-                      {Math.abs(difference) < investable * .005 ? <Check size={14} /> : difference > 0 ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
-                      {Math.abs(difference) < investable * .005 ? 'Close to suggested' : `${difference > 0 ? 'Increase' : 'Reduce'} by ${formatMoney(Math.abs(difference))}`}
+                    <div className={cx('plan-adjustment', closeToTarget && 'plan-adjustment--steady', difference < 0 && !isAvailableCash && 'plan-adjustment--reduce')}>
+                      {closeToTarget ? <Check size={14} /> : difference > 0 ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
+                      {isAvailableCash ? `${formatMoney(item.current)} available to assign` : closeToTarget ? 'Close to suggested' : difference > 0 ? `Suggested gap ${formatMoney(difference)}` : `Above suggested by ${formatMoney(Math.abs(difference))}`}
                     </div>
                   </div>
-                )
-              })}
-            </div>
-          ) : <EmptyState icon={PieChartIcon} title="Add your asset totals first" copy="Enter cash, stocks or funds, and bonds or deposits on the Net Worth page to generate a plan." action="Go to Net Worth" onAction={() => onNavigate('networth')} />}
+                  )
+                })}
+              </div>
+              <div className="stability-explainer"><Landmark size={18} /><div><strong>Deposits and bonds are tracked separately</strong><span>Fixed deposits may restrict access. Bonds and bond funds can change in value, so use diversified, high-quality fixed income for the stability role.</span></div></div>
+            </>
+          ) : <EmptyState icon={PieChartIcon} title="No investable portfolio yet" copy="Add fixed deposits, bonds, equity funds, or diversifiers—or cash above your reserve target—to generate a mix." action="Go to Net Worth" onAction={() => onNavigate('networth')} />}
         </section>
 
         <section className="card calculator-card">
@@ -1650,9 +1696,9 @@ function AssetPlanPage({ items, settings, formatMoney, updateSettings, onNavigat
           <p className="section-intro">These rates are estimates for comparison—not promises or forecasts.</p>
           <label className="field"><span>Risk framework</span><select value={settings.riskProfile} onChange={(event) => updateSettings('riskProfile', event.target.value as AppSettings['riskProfile'])}><option>Conservative</option><option>Balanced</option><option>Growth</option></select><small>{profile.description}</small></label>
           <div className="rate-list">
-            <RateInput label="Cash rate" value={settings.cashReturnRate} onChange={(value) => updateSettings('cashReturnRate', value)} />
-            <RateInput label="Income rate" value={settings.incomeReturnRate} onChange={(value) => updateSettings('incomeReturnRate', value)} />
+            <RateInput label="Stability return" value={settings.incomeReturnRate} onChange={(value) => updateSettings('incomeReturnRate', value)} />
             <RateInput label="Growth return" value={settings.growthReturnRate} onChange={(value) => updateSettings('growthReturnRate', value)} />
+            <RateInput label="Diversifier return" value={settings.diversifierReturnRate} onChange={(value) => updateSettings('diversifierReturnRate', value)} />
           </div>
           <label className="field"><span>Monthly contribution (THB)</span><div className="money-input"><span>{currencySymbol(BASE_CURRENCY)}</span><input type="text" inputMode="numeric" pattern="[0-9,]*" placeholder="0" value={moneyInputValue(settings.monthlyContribution)} onChange={(event) => updateSettings('monthlyContribution', moneyNumberFromText(event.target.value))} /></div></label>
           <div className="projection-box">
@@ -1665,6 +1711,7 @@ function AssetPlanPage({ items, settings, formatMoney, updateSettings, onNavigat
         </section>
       </div>
 
+      <div className="classification-note"><ShieldCheck size={18} /><div><strong>Classify funds by what they own</strong><span>Money-market funds are cash-like investments, bond funds belong under fixed income, and equity funds belong under long-term growth. A fund name alone does not determine its role.</span></div></div>
       {excludedAssets > 0 && <div className="excluded-note"><Building2 size={18} /><div><strong>{formatMoney(excludedAssets)} is excluded from the allocation calculation</strong><span>Property, vehicles, and other personal assets count toward net worth but may not be liquid or suitable for this investment mix.</span></div></div>}
     </>
   )
@@ -2290,7 +2337,7 @@ function NetWorthItemModal({ item, currency, onClose, onSave, onDelete }: {
   const [form, setForm] = useState<NetWorthItem>(item ?? {
     id: crypto.randomUUID(),
     name: '',
-    category: 'Cash',
+    category: 'Cash & savings',
     value: 0,
     note: '',
   })
@@ -2298,7 +2345,7 @@ function NetWorthItemModal({ item, currency, onClose, onSave, onDelete }: {
 
   const changeKind = (nextKind: 'asset' | 'liability') => {
     setKind(nextKind)
-    setForm((current) => ({ ...current, category: nextKind === 'asset' ? 'Cash' : 'Mortgage' }))
+    setForm((current) => ({ ...current, category: nextKind === 'asset' ? 'Cash & savings' : 'Mortgage' }))
   }
 
   const submit = (event: FormEvent) => {
@@ -2320,7 +2367,7 @@ function NetWorthItemModal({ item, currency, onClose, onSave, onDelete }: {
             <label className="field"><span>Name</span><input autoFocus value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} required /></label>
             <label className="field"><span>Value ({currency})</span><div className="money-input money-input--emphasis"><span>{currencySymbol(currency)}</span><input type="text" inputMode="numeric" pattern="[0-9,]*" value={moneyInputValue(form.value)} onChange={(event) => setForm((current) => ({ ...current, value: moneyNumberFromText(event.target.value) }))} required /></div></label>
           </div>
-          <label className="field"><span>Category</span><select value={form.category} onChange={(event) => setForm((current) => ({ ...current, category: event.target.value as NetWorthCategory }))}>{categories.map((category) => <option key={category}>{category}</option>)}</select></label>
+          <label className="field"><span>Category</span><select value={form.category} onChange={(event) => setForm((current) => ({ ...current, category: event.target.value as NetWorthCategory }))}>{categories.map((category) => <option key={category}>{category}</option>)}</select>{kind === 'asset' && <small className="field-hint">Classify a fund by what it owns: money market, bonds, or equities.</small>}</label>
           <label className="field"><span>Note (optional)</span><input value={form.note} onChange={(event) => setForm((current) => ({ ...current, note: event.target.value }))} /></label>
           <div className="modal__actions">
             {item && <button type="button" className="button button--danger" onClick={() => window.confirm(`Remove ${item.name} from your net worth?`) && onDelete(item.id)}><Trash2 size={16} />Remove</button>}
