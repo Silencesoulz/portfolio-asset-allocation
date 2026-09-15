@@ -22,6 +22,7 @@ import {
   EyeOff,
   HeartPulse,
   Landmark,
+  LockKeyhole,
   LogOut,
   Menu,
   Mail,
@@ -47,6 +48,8 @@ type Page = 'networth' | 'income' | 'overview' | 'allocation' | 'holdings' | 'pl
 type AssetClass = 'US equity' | 'International equity' | 'Fixed income' | 'Cash' | 'Real assets'
 type NetWorthCategory = 'Cash & savings' | 'Fixed deposits' | 'Bonds / fixed income' | 'Stocks / equity funds' | 'Gold / diversifiers' | 'Property' | 'Vehicle' | 'Other asset' | 'Mortgage' | 'Loan' | 'Credit card' | 'Other liability'
 type CurrencyCode = 'THB' | 'USD' | 'AUD'
+type AuthMethod = 'magic-link' | 'password'
+type PasswordAuthIntent = 'sign-in' | 'sign-up'
 
 type Holding = {
   id: string
@@ -398,7 +401,9 @@ function App() {
   const [reminderClock] = useState(currentTimestamp)
   const [toast, setToast] = useState<string | null>(null)
   const [accountOpen, setAccountOpen] = useState(false)
+  const [authMethod, setAuthMethod] = useState<AuthMethod>('magic-link')
   const [authEmail, setAuthEmail] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
   const [authMessage, setAuthMessage] = useState<string | null>(null)
   const [authBusy, setAuthBusy] = useState(false)
   const [user, setUser] = useState<SupabaseUser | null>(null)
@@ -701,12 +706,54 @@ function App() {
     if (!supabase || !authEmail.trim()) return
     setAuthBusy(true)
     setAuthMessage(null)
-    const { error } = await supabase.auth.signInWithOtp({
-      email: authEmail.trim(),
-      options: { emailRedirectTo: window.location.origin },
-    })
-    setAuthBusy(false)
-    setAuthMessage(error ? error.message : 'Check your email and open the secure sign-in link on this device.')
+    try {
+      const { error } = await supabase.auth.signInWithOtp({
+        email: authEmail.trim(),
+        options: { emailRedirectTo: new URL(import.meta.env.BASE_URL, window.location.origin).toString() },
+      })
+      setAuthMessage(error ? error.message : 'Check your email and open the secure sign-in link on this device.')
+    } catch {
+      setAuthMessage('Unable to send the sign-in link. Check your connection and try again.')
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  const authenticateWithPassword = async (event: FormEvent, intent: PasswordAuthIntent) => {
+    event.preventDefault()
+    const email = authEmail.trim()
+    if (!supabase || !email || !authPassword) return
+    setAuthBusy(true)
+    setAuthMessage(null)
+
+    try {
+      if (intent === 'sign-up') {
+        const { data: signUpData, error } = await supabase.auth.signUp({
+          email,
+          password: authPassword,
+          options: { emailRedirectTo: new URL(import.meta.env.BASE_URL, window.location.origin).toString() },
+        })
+        if (error) {
+          setAuthMessage(error.message)
+        } else if (!signUpData.session) {
+          setAuthPassword('')
+          setAuthMessage('Check your email to confirm your account, then sign in with your password.')
+        } else {
+          setAuthPassword('')
+        }
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email, password: authPassword })
+        if (error) {
+          setAuthMessage(error.message)
+        } else {
+          setAuthPassword('')
+        }
+      }
+    } catch {
+      setAuthMessage('Unable to sign in. Check your connection and try again.')
+    } finally {
+      setAuthBusy(false)
+    }
   }
 
   const signOut = async () => {
@@ -1041,14 +1088,23 @@ function App() {
           syncStatus={syncStatus}
           syncStatusLabel={syncStatusLabel}
           syncError={syncError}
+          method={authMethod}
           email={authEmail}
+          password={authPassword}
           message={authMessage}
           busy={authBusy}
+          onMethodChange={(method) => {
+            setAuthMethod(method)
+            setAuthMessage(null)
+          }}
           onEmailChange={setAuthEmail}
-          onSubmit={sendMagicLink}
+          onPasswordChange={setAuthPassword}
+          onMagicLinkSubmit={sendMagicLink}
+          onPasswordSubmit={authenticateWithPassword}
           onSignOut={signOut}
           onClose={() => {
             setAccountOpen(false)
+            setAuthPassword('')
             setAuthMessage(null)
           }}
         />
@@ -2273,17 +2329,22 @@ function IncomePeriodModal({ period, onClose, onSave, onDelete }: {
   )
 }
 
-function AccountModal({ configured, user, syncStatus, syncStatusLabel, syncError, email, message, busy, onEmailChange, onSubmit, onSignOut, onClose }: {
+function AccountModal({ configured, user, syncStatus, syncStatusLabel, syncError, method, email, password, message, busy, onMethodChange, onEmailChange, onPasswordChange, onMagicLinkSubmit, onPasswordSubmit, onSignOut, onClose }: {
   configured: boolean
   user: SupabaseUser | null
   syncStatus: SyncStatus
   syncStatusLabel: string
   syncError: string | null
+  method: AuthMethod
   email: string
+  password: string
   message: string | null
   busy: boolean
+  onMethodChange: (method: AuthMethod) => void
   onEmailChange: (value: string) => void
-  onSubmit: (event: FormEvent) => void
+  onPasswordChange: (value: string) => void
+  onMagicLinkSubmit: (event: FormEvent) => void
+  onPasswordSubmit: (event: FormEvent, intent: PasswordAuthIntent) => void
   onSignOut: () => void
   onClose: () => void
 }) {
@@ -2307,11 +2368,33 @@ function AccountModal({ configured, user, syncStatus, syncStatusLabel, syncError
             <button className="button button--secondary button--full" type="button" disabled={busy} onClick={onSignOut}><LogOut size={16} /> Sign out</button>
           </div>
         ) : (
-          <form className="account-sign-in" onSubmit={onSubmit}>
-            <div className="account-state"><Cloud size={20} /><div><strong>Use the same portfolio everywhere</strong><span>Sign in by secure email link—no password to remember.</span></div></div>
-            <label className="field"><span>Email address</span><div className="auth-email-input"><Mail size={17} /><input type="email" autoComplete="email" placeholder="you@example.com" value={email} onChange={(event) => onEmailChange(event.target.value)} required /></div></label>
+          <form
+            className="account-sign-in"
+            onSubmit={(event) => {
+              if (method === 'magic-link') {
+                onMagicLinkSubmit(event)
+                return
+              }
+              const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null
+              onPasswordSubmit(event, submitter?.value === 'sign-up' ? 'sign-up' : 'sign-in')
+            }}
+          >
+            <div className="auth-method-switch" role="tablist" aria-label="Sign-in method">
+              <button type="button" role="tab" aria-selected={method === 'magic-link'} className={cx(method === 'magic-link' && 'active')} onClick={() => onMethodChange('magic-link')}><Mail size={16} /> Email link</button>
+              <button type="button" role="tab" aria-selected={method === 'password'} className={cx(method === 'password' && 'active')} onClick={() => onMethodChange('password')}><LockKeyhole size={16} /> Password</button>
+            </div>
+            <div className="account-state"><Cloud size={20} /><div><strong>Use the same portfolio everywhere</strong><span>{method === 'magic-link' ? 'Sign in by secure email link—no password to remember.' : 'Sign in with your email and password on any device.'}</span></div></div>
+            <label className="field"><span>Email address</span><div className="auth-email-input"><Mail size={17} /><input name="email" type="email" inputMode="email" autoCapitalize="none" autoComplete="email" placeholder="you@example.com" value={email} onChange={(event) => onEmailChange(event.target.value)} required /></div></label>
+            {method === 'password' && <label className="field"><span>Password</span><div className="auth-email-input"><LockKeyhole size={17} /><input name="password" type="password" autoComplete="current-password" placeholder="At least 6 characters" minLength={6} value={password} onChange={(event) => onPasswordChange(event.target.value)} required /></div></label>}
             {message && <div className={cx('auth-message', message.toLowerCase().includes('check your email') ? 'auth-message--success' : 'auth-message--error')}>{message}</div>}
-            <button className="button button--primary button--full" type="submit" disabled={busy}>{busy ? 'Sending secure link…' : 'Email me a sign-in link'}</button>
+            {method === 'magic-link' ? (
+              <button className="button button--primary button--full" type="submit" disabled={busy}>{busy ? 'Sending secure link…' : 'Email me a sign-in link'}</button>
+            ) : (
+              <div className="auth-password-actions">
+                <button className="button button--primary" type="submit" value="sign-in" disabled={busy}>{busy ? 'Please wait…' : 'Sign in'}</button>
+                <button className="button button--secondary" type="submit" value="sign-up" disabled={busy}>Create account</button>
+              </div>
+            )}
             <p className="account-privacy"><ShieldCheck size={15} />Only your signed-in user can read or change these records.</p>
           </form>
         )}

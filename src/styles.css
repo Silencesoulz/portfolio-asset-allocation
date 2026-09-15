@@ -630,9 +630,13 @@ body:has(.modal-layer) .main-content { overflow: hidden; }
 .account-setup code { padding: 2px 5px; border-radius: 5px; background: #efeee9; color: #3a5b50; font-size: 11px; }
 .account-sign-in .account-state { margin-bottom: 18px; }
 .account-sign-in .field { margin-bottom: 15px; }
+.auth-method-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 16px; padding: 5px; border-radius: 11px; background: #efefea; }
+.auth-method-switch button { min-height: 38px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 0; border-radius: 8px; background: transparent; color: #74837c; font-size: 12px; font-weight: 700; cursor: pointer; }
+.auth-method-switch button.active { color: #285e4e; background: #fffefa; box-shadow: 0 2px 8px rgba(30,50,43,.08); }
 .auth-email-input { display: flex; align-items: center; border: 1px solid #dcdbd4; border-radius: 9px; background: #fbfaf7; }
 .auth-email-input svg { margin-left: 11px; color: #809089; }
 .auth-email-input input { border: 0 !important; box-shadow: none !important; background: transparent !important; }
+.auth-password-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .auth-message { margin: 0 0 14px; padding: 10px 11px; border-radius: 8px; font-size: 11px; line-height: 1.45; }
 .auth-message--success { color: #326553; background: #e7f1ec; }
 .auth-message--error { color: #98543f; background: #f6e6e0; }
@@ -950,6 +954,7 @@ td { font-size: 12px; }
   .modal { max-height: calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); padding: 20px; }
   .field input:not([type='range']), .field select { font-size: 16px; }
   .button { min-height: 44px; }
+  .auth-method-switch button { min-height: 44px; }
   .topbar .icon-button { width: 44px; height: 44px; }
   .currency-control, .currency-control select { height: 44px; }
   .income-role-row { grid-template-columns: minmax(0,1fr) 44px; }

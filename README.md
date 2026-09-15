@@ -13,7 +13,7 @@ Steady is a private, browser-based net-worth and asset-allocation tracker for pe
 - THB-based values with live USD and AUD display conversion, privacy masking, and responsive mobile navigation
 - Automatic monthly net-worth snapshots with a twelve-month trend view
 - A dedicated income-progress page with a salary progression graph and company, role, and employment timeline
-- Optional Supabase magic-link accounts, secure cross-device sync, and Realtime updates
+- Optional Supabase email-link or email-and-password accounts, secure cross-device sync, and Realtime updates
 - Clearly separated sample data and educational disclaimers
 
 ## Run locally
@@ -44,7 +44,7 @@ The app works in local mode without Supabase. To enable accounts and cross-devic
    ```
 
 4. In Supabase Authentication URL Configuration, set the Site URL and allowed redirect URL to your deployed site. Add the local Vite URL while developing.
-5. Restart the development server, open the account panel in the sidebar, and request a sign-in link.
+5. Restart the development server, open the account panel in the sidebar, and sign in with either an email link or an email and password. New password users can create an account from the same panel.
 
 Never put a Supabase service-role key in a Vite environment variable. The browser should use only the publishable key; access is restricted by the included Row Level Security policies.
 
